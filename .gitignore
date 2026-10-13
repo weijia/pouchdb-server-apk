@@ -1,0 +1,23 @@
+# Gradle
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+
+# 构建产物
+app/build/
+app/release-key.jks
+
+# 构建时下载/生成的产物（由 scripts/*.sh 生成，不入库）
+app/src/main/jniLibs/
+app/src/main/assets/nodejs-project/
+
+# Node 依赖
+nodejs-project/node_modules/
+
+# 运行时数据（真机上）
+nodejs-project/data/
+
+# 临时文件
+*.log

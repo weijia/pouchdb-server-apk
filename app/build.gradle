@@ -1,0 +1,83 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'net.weijia.pouchdbserver'
+    compileSdk 34
+    ndkVersion '25.2.9519653'
+
+    defaultConfig {
+        applicationId 'net.weijia.pouchdbserver'
+        minSdk 24            // nodejs-mobile 要求 API 24+
+        targetSdk 34
+        versionCode 1
+        versionName '1.0.0'
+
+        ndk {
+            // 只保留移动设备主流架构，x86_64 会显著增大 APK
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags ''
+                arguments '-DANDROID_STL=c++_shared'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    packagingOptions {
+        // node 运行时与 native 库冲突时的兜底策略
+        pickFirst 'lib/*/libnode.so'
+        pickFirst 'lib/*/libc++_shared.so'
+    }
+
+    // assets 里包含完整 node_modules，禁用压缩可略微加快首启动（体积换速度）
+    androidResources {
+        noCompress 'js'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.12.0'
+}
+
+// ============ 签名配置 ============
+// 放在 android {} 之后：Groovy DSL 下在块内调用 System.getenv() + file() 会报
+// "No signature of method: java.lang.String.call()"。
+// 本地构建不设置环境变量时整段跳过，使用 debug 签名；
+// CI 设置了 KEYSTORE_PATH 时使用 release 签名（保证可覆盖安装）。
+if (System.getenv("KEYSTORE_PATH") != null && System.getenv("KEYSTORE_PASSWORD") != null) {
+    android.signingConfigs {
+        release {
+            storeFile file(System.getenv("KEYSTORE_PATH"))
+            storePassword System.getenv("KEYSTORE_PASSWORD")
+            keyAlias System.getenv("KEY_ALIAS") ?: "release"
+            keyPassword System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
+        }
+    }
+    android.buildTypes.release.signingConfig android.signingConfigs.release
+} else {
+    // 无 keystore 时回退到固定的 debug 签名，保证 APK 可覆盖安装
+    android.buildTypes.release.signingConfig android.signingConfigs.debug
+}

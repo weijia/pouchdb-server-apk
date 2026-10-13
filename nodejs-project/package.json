@@ -1,0 +1,21 @@
+{
+  "name": "pouchdb-server-node",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CouchDB 兼容服务端（PouchDB + express-pouchdb），运行在 nodejs-mobile 中",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "selftest": "node selftest.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "express-pouchdb": "^4.2.0",
+    "pouchdb-adapter-memory": "^8.0.1",
+    "pouchdb-core": "^8.0.1",
+    "pouchdb-find": "^9.0.0",
+    "pouchdb-mapreduce": "^8.0.1",
+    "pouchdb-replication": "^8.0.1"
+  }
+}

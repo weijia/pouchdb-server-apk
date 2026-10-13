@@ -1,0 +1,140 @@
+name: Build APK and Upload to SFTP
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Node 20
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    # 先在 CI 上验证 Node 侧逻辑（CouchDB 兼容端点 + 快照持久化），
+    # 避免打完 APK 才发现依赖/协议问题
+    - name: Node selftest
+      working-directory: ./nodejs-project
+      run: |
+        npm ci --no-audit --no-fund
+        npm run selftest
+
+    - name: Prepare node project for assets
+      run: |
+        chmod +x scripts/prepare-node-project.sh
+        ./scripts/prepare-node-project.sh
+
+    - name: Fetch nodejs-mobile runtime (libnode.so)
+      env:
+        NODEJS_MOBILE_VERSION: v18.20.4
+      run: |
+        chmod +x scripts/fetch-nodejs-mobile.sh
+        ./scripts/fetch-nodejs-mobile.sh
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install NDK and CMake
+      run: |
+        yes | sdkmanager --licenses > /dev/null || true
+        sdkmanager --install "ndk;25.2.9519653" "cmake;3.22.1" > /dev/null
+        sdkmanager --list_installed | grep -E "ndk|cmake" || true
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '7.5'
+
+    # ========== 版本号处理 ==========
+    - name: Update versionCode before build
+      id: version
+      run: |
+        VERSION_NAME=$(grep "versionName" app/build.gradle | head -1 | sed 's/.*versionName *"\([^"]*\)".*/\1/')
+        BUILD_NUMBER=${{ github.run_number }}
+        sed -i "s/versionCode [0-9]*/versionCode ${BUILD_NUMBER}/" app/build.gradle
+        echo "Updated versionCode:"
+        grep "versionCode" app/build.gradle
+        echo "version_name=${VERSION_NAME}" >> $GITHUB_OUTPUT
+        echo "build_number=${BUILD_NUMBER}" >> $GITHUB_OUTPUT
+        echo "apk_name=pouchdb-server-apk-v${VERSION_NAME}-build${BUILD_NUMBER}.apk" >> $GITHUB_OUTPUT
+
+    # ========== 签名 + 构建 ==========
+    - name: Setup Release Keystore and Build
+      env:
+        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      run: |
+        if [ -n "$KEYSTORE_BASE64" ]; then
+          echo "Building Release APK with keystore..."
+          echo "$KEYSTORE_BASE64" | base64 -d > app/release-key.jks
+          export KEYSTORE_PATH=release-key.jks
+          gradle assembleRelease
+          echo "APK_TYPE=release" >> $GITHUB_ENV
+        else
+          echo "Building Debug APK (no keystore secrets configured)..."
+          gradle assembleDebug
+          echo "APK_TYPE=debug" >> $GITHUB_ENV
+        fi
+
+    # ========== 重命名 APK ==========
+    - name: Rename APK with version
+      run: |
+        if [ -f "app/build/outputs/apk/release/app-release.apk" ]; then
+          cp app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/${{ steps.version.outputs.apk_name }}
+          echo "APK_TYPE=release" >> $GITHUB_ENV
+        else
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/${{ steps.version.outputs.apk_name }}
+          echo "APK_TYPE=debug" >> $GITHUB_ENV
+        fi
+        ls -lh app/build/outputs/apk/${{ env.APK_TYPE }}/${{ steps.version.outputs.apk_name }}
+
+    # ========== SFTP 上传 ==========
+    - name: Upload APK to SFTP
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: weijia/action-upload-sftp@master
+      with:
+        sftp-host: ${{ secrets.SFTP_HOST }}
+        sftp-port: ${{ secrets.SFTP_PORT }}
+        sftp-username: ${{ secrets.SFTP_USERNAME }}
+        sftp-password: ${{ secrets.SFTP_PASSWORD }}
+        source-path: app/build/outputs/apk/${{ env.APK_TYPE }}/${{ steps.version.outputs.apk_name }}
+        remote-path: /home/github/apps/pouchdb-server-apk/${{ steps.version.outputs.apk_name }}
+        cleanup-old-files: 'true'
+        max-keep-files: 5
+
+    # ========== Artifact 上传 ==========
+    - name: Upload APK (Artifact)
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-${{ env.APK_TYPE }}
+        path: app/build/outputs/apk/${{ env.APK_TYPE }}/${{ steps.version.outputs.apk_name }}
+
+    # ========== 提交 versionCode 更新 ==========
+    - name: Commit versionCode update
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      run: |
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git add app/build.gradle
+        git commit -m "[skip ci] Update versionCode to ${{ steps.version.outputs.build_number }}" || echo "No changes to commit"
+        git push origin HEAD:main

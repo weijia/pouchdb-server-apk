@@ -1,0 +1,4 @@
+# CI 在 Linux 上执行这些脚本，必须保持 LF
+*.sh text eol=lf
+*.yml text eol=lf
+*.js text eol=lf
