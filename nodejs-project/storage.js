@@ -13,6 +13,22 @@ function snapshotPath(dataDir, name) {
   return path.join(dataDir, safe + '.snapshot.json');
 }
 
+// 持久化落盘：writeFileSync 只保证写进内核页缓存，掉电时仍可能丢失。
+// 必须 fsync 文件（数据落盘）+ fsync 目录（rename 元数据落盘）才算真正"落盘"。
+function fsyncFile(file) {
+  try {
+    const fd = fs.openSync(file, 'r+');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  } catch (e) { /* 某些平台不支持 fsync，忽略 */ }
+}
+
+function fsyncDir(dir) {
+  try {
+    const fd = fs.openSync(dir, 'r');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  } catch (e) { /* 目录 fsync 不支持的平台忽略 */ }
+}
+
 class SnapshotStore {
   constructor(dataDir) {
     this.dataDir = dataDir;
@@ -22,12 +38,25 @@ class SnapshotStore {
 
   register(name, db) {
     if (this.registry.has(name)) return;
-    const entry = { db, dirty: false, lastSave: 0 };
+    const entry = { db, dirty: false, lastSave: 0, feed: null };
     this.registry.set(name, entry);
+    this.subscribe(name, entry);
+    return entry;
+  }
+
+  // 用 live changes 标记脏；订阅异常时标记脏并定时重连，
+  // 否则订阅一旦中断就会静默漏写，导致数据永远不落盘。
+  subscribe(name, entry) {
     try {
-      db.changes({ since: 'now', live: true })
+      entry.feed = entry.db.changes({ since: 'now', live: true })
         .on('change', () => { entry.dirty = true; })
-        .on('error', () => { /* 忽略，flush 时会重新尝试 */ });
+        .on('error', () => {
+          entry.dirty = true;
+          entry.feed = null;
+          setTimeout(() => {
+            if (this.registry.get(name) === entry) this.subscribe(name, entry);
+          }, 1000);
+        });
     } catch (e) {
       // 某些 adapter 不支持 live changes：退化为定期全量保存
       entry.dirty = true;
@@ -94,19 +123,25 @@ class SnapshotStore {
     const docs = await this.exportDocs(entry.db);
     const payload = JSON.stringify({ name, updatedAt: Date.now(), docs });
     fs.writeFileSync(tmp, payload);
-    fs.renameSync(tmp, target); // 原子替换，避免写到一半崩溃导致快照损坏
+    fsyncFile(tmp);                 // 数据真正落盘
+    fs.renameSync(tmp, target);    // 原子替换，避免写到一半崩溃导致快照损坏
+    fsyncDir(path.dirname(target)); // 目录元数据（rename）落盘
     entry.dirty = false;
     entry.lastSave = Date.now();
     return true;
   }
 
-  async flushAll(force) {
+  // force=true 时强制落盘所有库（用于停止/退出前）；
+  // 否则只落盘脏库，但可传入 maxAgeMs 让"超期未落盘"的库也强制落盘，
+  // 作为 live changes 订阅中断时的兜底，保证数据周期性落盘。
+  async flushAll(force, maxAgeMs) {
+    const now = Date.now();
     const saved = [];
     for (const name of Array.from(this.registry.keys())) {
-      if (force) {
-        const entry = this.registry.get(name);
-        entry.dirty = true;
-      }
+      const entry = this.registry.get(name);
+      if (force) entry.dirty = true;
+      const stale = maxAgeMs && (now - entry.lastSave) > maxAgeMs;
+      if (!entry.dirty && !stale) continue;
       try {
         if (await this.flushOne(name)) saved.push(name);
       } catch (e) {

@@ -312,7 +312,7 @@ async function start(opts) {
     startListening(state, function (err) { (err ? reject(err) : resolve()); });
   });
 
-  // 定期发现新建的数据库并落盘
+  // 定期发现新建的数据库并落盘（脏库才写，轻量）
   state.timer = setInterval(async function () {
     try {
       await store.syncRegistry(PouchDB);
@@ -323,10 +323,24 @@ async function start(opts) {
     }
   }, opts.snapshotIntervalMs);
 
+  // 周期强制落盘：即便 live changes 订阅意外中断、漏标脏，
+  // 也保证每个库最多 30s（或 6 个快照周期）内被持久化一次。
+  const FORCE_FLUSH_MS = Math.max(opts.snapshotIntervalMs * 6, 30000);
+  state.forceTimer = setInterval(async function () {
+    try {
+      await store.syncRegistry(PouchDB);
+      const saved = await store.flushAll(false, FORCE_FLUSH_MS);
+      if (saved.length) console.log('[storage] 周期强制落盘: ' + saved.join(', '));
+    } catch (e) {
+      console.error('[storage] 周期强制落盘异常: ' + e.message);
+    }
+  }, FORCE_FLUSH_MS);
+
   const shutdown = async function (signal) {
     console.log('[server] 收到 ' + signal + '，正在保存快照...');
     try {
       clearInterval(state.timer);
+      clearInterval(state.forceTimer);
       await store.syncRegistry(PouchDB);
       await store.flushAll(true);
       console.log('[server] 快照保存完成');

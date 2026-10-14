@@ -91,11 +91,15 @@ db.sync('http://192.168.1.20:5984/mydb', { live: true, retry: true })
 
 ## 持久化机制与局限
 
-PouchDB 的 `memory` adapter 不落盘，本项目用**快照**持久化：
+PouchDB 的 `memory` adapter 不落盘，本项目用**快照**持久化（见 `nodejs-project/storage.js`）：
 
-- 每 5 秒（可配 `--snapshot-ms`）把各库的 `changes(since=0, include_docs=true)` 导出为 JSON
+- 每 5 秒（可配 `--snapshot-ms`）把脏库的 `changes(since=0, include_docs=true)` 导出为 JSON
 - 用 `new_edits=false` 恢复，保留原始 `_rev` 与删除标记，避免同步对端出现修订分叉
-- 停止服务、收到控制命令时强制落盘
+- **真正落盘**：写入先 `fsync` 文件（数据落盘）再 `rename`，再 `fsync` 目录（rename 元数据落盘），掉电/强杀也不丢已保存的快照
+- **兜底**：若内存库的 live-changes 订阅意外中断，会标记脏并自动重连；另有一个 30s 周期**强制落盘**，保证每个库最多 30s 内被持久化一次（脏库或超期库均写）
+- 停止服务（`/stop`）、收到 `/flush`、进程退出前都强制全量落盘
+
+数据丢失窗口：正常情况受 `--snapshot-ms` 控制（默认 5s），最坏不超过 30s；进程被系统强杀时未落盘的那部分内存数据会丢失（前台服务 + 周期落盘已把窗口压到最小，彻底零丢失需改为原生 on-disk adapter）。
 
 局限：数据全量在内存并整体序列化，**适合中小数据量**；若数据量较大，
 可把 `storage.js` 换成基于 `leveldown` 的实现（需为 nodejs-mobile 交叉编译原生模块）。

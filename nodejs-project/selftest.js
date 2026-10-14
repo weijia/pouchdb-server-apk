@@ -170,12 +170,21 @@ async function main() {
 
   console.log('');
   if (failures) {
-    console.log('SELFTEST FAILED: ' + failures + ' 项失败');
+    console.error('SELFTEST FAILED: ' + failures + ' 项失败');
     process.exitCode = 1;
-    return;
+  } else {
+    console.log('SELFTEST PASSED');
+    process.exitCode = 0;
   }
-  console.log('SELFTEST PASSED');
-  process.exitCode = 0;
+  // start() 内部注册了定时落盘（含 30s 强制落盘），会保持事件循环存活；
+  // 测试结束必须清理，否则进程不会自然退出。
+  try {
+    if (first && first.state) {
+      if (first.state.timer) clearInterval(first.state.timer);
+      if (first.state.forceTimer) clearInterval(first.state.forceTimer);
+    }
+  } catch (e) { /* ignore */ }
+  process.exit(process.exitCode);
 }
 
 main().catch(function (e) {
