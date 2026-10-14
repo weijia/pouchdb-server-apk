@@ -87,8 +87,8 @@ public class MainActivity extends Activity {
             }
         });
 
-        // 打开即尝试拉起前台服务：已授权直接启动，未授权先弹申请，授权后再启动
-        maybeAutoStart();
+        // 不再“一打开就自动起前台服务”（那会引发权限弹窗轰炸 + Android 14 无通知权限时秒退）。
+        // 改为用户点“启动服务”时才拉起，与 go-stock-server 一致。
     }
 
     @Override
@@ -257,24 +257,6 @@ public class MainActivity extends Activity {
         btnToggle.setText(isRunning ? "停止服务" : "启动服务");
     }
 
-    /** 已获通知权限（Android 12 及以下默认视为已授权）。 */
-    private boolean hasNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            return checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                    == PackageManager.PERMISSION_GRANTED;
-        }
-        return true;
-    }
-
-    /** 打开应用时尝试拉起服务：已授权直接启动，未授权先弹申请。 */
-    private void maybeAutoStart() {
-        if (hasNotificationPermission()) {
-            autoStartService();
-        } else {
-            requestNotificationPermissionIfNeeded();
-        }
-    }
-
     private void autoStartService() {
         Intent intent = new Intent(this, NodeService.class);
         intent.setAction(NodeService.ACTION_START);
@@ -284,16 +266,6 @@ public class MainActivity extends Activity {
             startService(intent);
         }
         Toast.makeText(this, "正在启动服务（状态栏将出现常驻通知）", Toast.LENGTH_SHORT).show();
-    }
-
-    private void requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                        REQ_NOTIFICATION);
-            }
-        }
     }
 
     private boolean ensureNotificationPermission() {
