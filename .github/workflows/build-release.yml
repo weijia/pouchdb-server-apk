@@ -21,13 +21,10 @@ jobs:
       with:
         node-version: '20'
 
-    # 先在 CI 上验证 Node 侧逻辑（CouchDB 兼容端点 + 快照持久化），
-    # 避免打完 APK 才发现依赖/协议问题
-    - name: Node selftest
-      working-directory: ./nodejs-project
+    # 最小验证版：仅确认 node 可用（服务端逻辑已临时移除，只验证 Node 能在 APK 内作为独立进程运行）
+    - name: Node sanity check
       run: |
-        npm ci --no-audit --no-fund
-        npm run selftest
+        node -e "console.log('node sanity ok: ' + process.version)"
 
     - name: Prepare node project for assets
       run: |
