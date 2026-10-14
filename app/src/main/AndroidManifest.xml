@@ -21,9 +21,12 @@
 
         <!-- 参照 go-stock-server 参考实现：用标准 dataSync 前台服务类型，
              比 specialUse 更稳，Android 14+ 跑局域网 HTTP 服务必需。 -->
+        <!-- 跑在独立进程 :node：Node 现在按官方姿势进程内嵌（JNI 专用线程），
+             进程隔离让 Node 崩溃只结束本进程，界面进程不受影响，服务可被系统重启。 -->
         <service
             android:name=".NodeService"
             android:exported="false"
+            android:process=":node"
             android:foregroundServiceType="dataSync">
         </service>
 

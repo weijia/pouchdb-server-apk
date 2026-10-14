@@ -3,9 +3,7 @@ package net.weijia.pouchdbserver;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
-import android.app.PendingIntent;
 import android.app.Service;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
@@ -23,15 +21,19 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 最小验证版前台服务：只负责把 Node 作为【独立原生进程】拉起（执行 assets 里的 main.js，
- * 当前仅打印 hello world），并把其标准输出写入 filesDir/node.log。
- * 不依赖任何 mDNS / HTTP / 控制端口——只为验证「Node 能否在 APK 内跑起来」。
+ * 最小验证版前台服务：把 assets 里的 node 工程复制到私有目录，然后按
+ * nodejs-mobile 官方姿势，用 JNI 在【专用线程】上调 node::Start() 跑 main.js。
+ *
+ * 本服务跑在独立 Android 进程（manifest 里 android:process=":node"），
+ * 因此 Node 崩溃只结束该进程，界面进程不受影响，服务还可被系统重启。
+ *
+ * 与上一版的关键差别：不再用 ProcessBuilder 另起可执行文件当独立进程。
+ * 那个做法依赖 nativeLibraryDir 的执行权限/SELinux 标签，且漏设了 TMPDIR，
+ * 是"连 hello world 都打不出来"的最大嫌疑；现在改回官方验证过的进程内嵌姿势。
  */
 public class NodeService extends Service {
 
@@ -50,7 +52,6 @@ public class NodeService extends Service {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
-    private Process nodeProcess;
     private boolean nodeStarted;
     private volatile boolean stopping;
 
@@ -58,7 +59,7 @@ public class NodeService extends Service {
     public void onCreate() {
         super.onCreate();
         try {
-            bootLog("onCreate");
+            bootLog("onCreate: process=:node");
             createChannel();
             // Android 14+ 必须先有通知权限才能 startForeground，否则系统强杀 → 秒退。
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
@@ -94,7 +95,7 @@ public class NodeService extends Service {
 
     @Override
     public void onDestroy() {
-        stopProcess();
+        nodeStarted = false;
         executor.shutdownNow();
         super.onDestroy();
     }
@@ -109,9 +110,9 @@ public class NodeService extends Service {
             public void run() {
                 try {
                     File projectDir = prepareNodeProject();
-                    startNodeProcess(projectDir);
+                    startNode(projectDir);
                     broadcast(true, true, "Node 运行中（hello world）");
-                } catch (Exception e) {
+                } catch (Throwable e) {
                     Log.e(TAG, "启动失败", e);
                     bootLog("启动失败: " + Log.getStackTraceString(e));
                     broadcast(false, false, "启动失败: " + e.getMessage());
@@ -136,95 +137,51 @@ public class NodeService extends Service {
     }
 
     /**
-     * 作为【独立进程】拉起 Node：libpouchdb.so（链接 libnode.so，调用 node::Start 跑 main.js）。
-     * 与“JNI 内联在 App 进程里”的根本差别在于此——崩溃隔离，Node 崩了不会拖死 App。
+     * 按官方姿势启动 Node：JNI 在专用线程上调 node::Start()。
+     * 关键点：
+     *   1) argv[0] 约定为 "node"，argv[1] 为脚本路径；
+     *   2) TMPDIR 指向 CacheDir（Android 无 /tmp，官方插件明确设置，之前我们漏了）；
+     *   3) NODE_PATH 指向工程目录，供 require() 解析模块；
+     *   4) 通过 --log-file 让 Node 把输出写进文件，界面才能看到（stdout 在安卓上不可见）。
      */
-    private void startNodeProcess(File projectDir) throws IOException {
+    private void startNode(File projectDir) throws IOException {
         File mainJs = new File(projectDir, "main.js");
-        File launcher = new File(getApplicationInfo().nativeLibraryDir, "libpouchdb.so");
-        if (!launcher.exists()) {
-            throw new IOException("Node 启动器缺失: " + launcher.getAbsolutePath());
-        }
-        // nativeLibraryDir 下的文件安装后即带执行权限；这里再保险一次
-        if (!launcher.canExecute() && !launcher.setExecutable(true)) {
-            throw new IOException("Node 启动器不可执行: " + launcher.getAbsolutePath());
+        if (!mainJs.exists()) {
+            throw new IOException("main.js 不存在: " + mainJs.getAbsolutePath());
         }
 
-        List<String> cmd = new ArrayList<>();
-        cmd.add(launcher.getAbsolutePath());
-        cmd.add(mainJs.getAbsolutePath());
-
-        // 清空旧日志，方便本次观察
         File logFile = new File(getFilesDir(), "node.log");
         if (logFile.exists()) {
             logFile.delete();
         }
 
-        ProcessBuilder pb = new ProcessBuilder(cmd);
-        pb.directory(projectDir);
-        // NODE_PATH 指向工程目录，保证 require() 能找到模块（当前 hello world 不需要）
-        pb.environment().put("NODE_PATH", projectDir.getAbsolutePath());
-        // libnode.so 与启动器同在 nativeLibraryDir，告知动态链接器去那里找
-        pb.environment().put("LD_LIBRARY_PATH", getApplicationInfo().nativeLibraryDir);
-        pb.redirectErrorStream(true);
+        String[] argv = new String[]{
+                "node",
+                mainJs.getAbsolutePath(),
+                "--log-file=" + logFile.getAbsolutePath(),
+        };
 
-        nodeProcess = pb.start();
+        String tmpDir = getCacheDir().getAbsolutePath();
+        String nodePath = projectDir.getAbsolutePath();
+
+        bootLog("startNode: mainJs=" + mainJs.getAbsolutePath()
+                + " tmpDir=" + tmpDir + " nodePath=" + nodePath);
+
+        try {
+            NodeBridge.startNode(argv, tmpDir, nodePath);
+        } catch (Throwable t) {
+            throw new IOException("加载/启动 node-bridge 失败: " + t.getMessage(), t);
+        }
+
         nodeStarted = true;
-        bootLog("Node 进程已启动 launcher=" + launcher.getAbsolutePath()
-                + " mainJs=" + mainJs.getAbsolutePath());
-
-        // 把标准输出（已含 stderr）持续写入 node.log。用线程手动拷贝，避免
-        // ProcessBuilder.redirectOutput(File) 仅在 API 26+ 可用的问题。
-        final OutputStream fos = new FileOutputStream(logFile, true);
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                byte[] buf = new byte[4096];
-                int n;
-                try (InputStream in = nodeProcess.getInputStream()) {
-                    while ((n = in.read(buf)) >= 0) {
-                        fos.write(buf, 0, n);
-                    }
-                } catch (IOException e) {
-                    Log.w(TAG, "读取 Node 输出失败", e);
-                } finally {
-                    try {
-                        fos.close();
-                    } catch (IOException ignored) {
-                    }
-                }
-            }
-        }).start();
-
-        // 监控进程退出：非正常退出（非 0）且非主动停止时，延迟自动重启
-        executor.execute(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    int code = nodeProcess.waitFor();
-                    Log.w(TAG, "Node 进程退出 code=" + code);
-                    nodeStarted = false;
-                    bootLog("Node 进程退出 code=" + code);
-                    if (!stopping && code != 0) {
-                        mainHandler.postDelayed(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (!stopping) startServer();
-                            }
-                        }, 3000);
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        });
+        bootLog("Node 已在专用线程启动");
     }
 
     // ==================== 停止流程 ====================
 
     private void stopServer() {
         stopping = true;
-        stopProcess();
+        nodeStarted = false;
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -236,17 +193,6 @@ public class NodeService extends Service {
                 stopSelf();
             }
         });
-    }
-
-    private void stopProcess() {
-        if (nodeProcess != null) {
-            try {
-                nodeProcess.destroy();
-            } catch (Throwable ignored) {
-            }
-            nodeProcess = null;
-        }
-        nodeStarted = false;
     }
 
     // ==================== 通知 ====================
@@ -270,7 +216,7 @@ public class NodeService extends Service {
 
     /**
      * 调用 startForeground。
-     * 1) API 34+ 传 dataSync 前台服务类型（与 manifest 声明一致，参照 go-stock-server）；
+     * 1) API 34+ 传 dataSync 前台服务类型（与 manifest 声明一致）；
      * 2) 任何异常都吞掉并记录，绝不向上抛——否则系统 5 秒超时强杀整个进程。
      */
     private void callStartForeground(Notification notification) {
