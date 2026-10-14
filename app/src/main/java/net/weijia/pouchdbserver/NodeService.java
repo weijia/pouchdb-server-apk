@@ -42,6 +42,9 @@ public class NodeService extends Service {
     private static final String CHANNEL_ID = App.CHANNEL_ID;
     private static final int NOTIFICATION_ID = 5984;
     private static final long POLL_INTERVAL_MS = 5000;
+    // 内联 mDNS 服务类型，避免通知构建时触碰 MdnsAdvertiser 类（任何类加载异常都会
+    // 导致 buildNotification 抛错、startForeground 失败、最终被系统 5 秒强杀）。
+    private static final String MDNS_SERVICE_TYPE = "_couchdb._tcp";
 
     public static final String ACTION_START = "net.weijia.pouchdbserver.action.START";
     public static final String ACTION_STOP = "net.weijia.pouchdbserver.action.STOP";
@@ -82,14 +85,12 @@ public class NodeService extends Service {
         controlPort = prefs.getControlPort();
         // 渠道已在 App.onCreate 建立；这里再确保一次（保险）。
         createChannel();
-        // 仿 go-stock-server：onCreate 内首先 startForeground，且包在 try/catch 里。
-        // 这样即便后续任何初始化抛异常，也不会出现“服务创建失败→系统杀进程”的连锁，
-        // 也不会让前台通知凭空消失。
-        try {
-            startForegroundNotification("正在启动 PouchDB 服务…");
-        } catch (Throwable t) {
-            Log.e(TAG, "startForeground 失败", t);
-        }
+        // 关键：onCreate 里第一时间 startForeground，建立前台服务。
+        // 之前用 try/catch 把 startForeground 的异常吞掉了——一旦它失败，
+        // 前台服务从未真正建立，系统会在 5 秒超时后抛 RemoteServiceException 强杀进程，
+        // 表现为“看不到通知 + 程序直接退出”。现在改为：富通知构建失败则回退最小通知，
+        // 并保留异常日志，绝不让 startForeground 静默失效。
+        startForegroundNotification("正在启动 PouchDB 服务…");
         // 注意：mDNS 初始化移到 startServer() 里，避免 onCreate 抛异常。
     }
 
@@ -344,13 +345,50 @@ public class NodeService extends Service {
         }
     }
 
+    /**
+     * 建立前台服务通知。保证 startForeground 一定被调用：
+     * 1) 优先构建富通知；2) 若构建抛异常，回退到“最小通知”（仅标题/文本/图标/点击）；
+     * 3) 若 startForeground 自身抛异常（如前台服务类型不匹配），记录并再次尝试，
+     *    绝不让调用静默失效——否则系统 5 秒超时后强杀整个进程。
+     */
     private void startForegroundNotification(String message) {
-        Notification notification = buildNotification(message, null, port, false);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        } else {
-            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, 0);
+        Notification notification = null;
+        try {
+            notification = buildNotification(message, null, port, false);
+        } catch (Throwable t) {
+            Log.e(TAG, "buildNotification 失败，回退最小通知", t);
+        }
+        if (notification == null) {
+            try {
+                notification = buildMinimalNotification(message);
+            } catch (Throwable t) {
+                Log.e(TAG, "buildMinimalNotification 也失败", t);
+            }
+        }
+        if (notification == null) {
+            // 极端兜底：连最小通知都建不出来，直接抛出来让 AMS 记录（总比静默被强杀强）
+            throw new IllegalStateException("无法构建前台通知");
+        }
+        callStartForeground(notification);
+    }
+
+    private void callStartForeground(Notification notification) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, 0);
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "startForeground 失败", t);
+            // 二次兜底：部分 ROM 对 specialUse 类型更严格，尝试不带类型再调一次
+            try {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, 0);
+            } catch (Throwable t2) {
+                Log.e(TAG, "startForeground 二次兜底仍失败（进程可能被系统强杀）", t2);
+                throw t2;
+            }
         }
     }
 
@@ -358,21 +396,35 @@ public class NodeService extends Service {
         String message = running
                 ? "运行中 " + (ip != null ? "http://" + ip + ":" + httpPort : "端口 " + httpPort)
                 : "已停止监听";
-        Notification notification = buildNotification(message, ip, httpPort, running);
+        Notification notification = null;
+        try {
+            notification = buildNotification(message, ip, httpPort, running);
+        } catch (Throwable t) {
+            Log.e(TAG, "updateNotification 构建失败，回退最小通知", t);
+        }
+        if (notification == null) {
+            try {
+                notification = buildMinimalNotification(message);
+            } catch (Throwable ignored) {
+            }
+        }
+        if (notification == null) return;
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm != null) {
             nm.notify(NOTIFICATION_ID, notification);
         }
     }
 
-    private Notification buildNotification(String message, String ip, int httpPort, boolean running) {
+    private PendingIntent buildContentIntent() {
         Intent intent = new Intent(this, MainActivity.class);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT
                 | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
-        PendingIntent pi = PendingIntent.getActivity(this, 0, intent, flags);
+        return PendingIntent.getActivity(this, 0, intent, flags);
+    }
 
+    private Notification buildNotification(String message, String ip, int httpPort, boolean running) {
         String sub = running
-                ? "mDNS: " + prefs.getInstance() + "." + MdnsAdvertiser.SERVICE_TYPE
+                ? "mDNS: " + prefs.getInstance() + "." + MDNS_SERVICE_TYPE
                 : "点击打开管理界面";
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
@@ -380,11 +432,23 @@ public class NodeService extends Service {
                 .setContentText(message)
                 .setSubText(sub)
                 .setSmallIcon(R.drawable.ic_stat_server)
-                .setContentIntent(pi)
+                .setContentIntent(buildContentIntent())
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .build();
+    }
+
+    /** 富通知构建失败时的兜底：只保留必要字段，最大限度避免抛异常。 */
+    private Notification buildMinimalNotification(String message) {
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("PouchDB Server")
+                .setContentText(message == null ? "正在运行" : message)
+                .setSmallIcon(R.drawable.ic_stat_server)
+                .setContentIntent(buildContentIntent())
+                .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT)
                 .build();
     }

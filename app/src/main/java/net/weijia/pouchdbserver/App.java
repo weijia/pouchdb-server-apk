@@ -5,6 +5,13 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.Context;
 import android.os.Build;
+import android.util.Log;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 /**
  * 仿 go-stock-server 的 StockApp：在 Application 创建时建立通知渠道，
@@ -17,11 +24,40 @@ import android.os.Build;
  */
 public class App extends Application {
     public static final String CHANNEL_ID = "pouchdb_server_fg";
+    private static final String TAG = "PouchDBApp";
 
     @Override
     public void onCreate() {
         super.onCreate();
+        installCrashLogger();
         createChannel();
+    }
+
+    /**
+     * 全局未捕获异常兜底：把堆栈写入 crash.log，方便“程序直接退出”时回看根因。
+     * 同时把异常交还给系统默认处理器，保证 AMS 仍按崩溃处理。
+     */
+    private void installCrashLogger() {
+        final Thread.UncaughtExceptionHandler def = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override
+            public void uncaughtException(Thread t, Throwable e) {
+                Log.e(TAG, "未捕获异常（已写入 crash.log）", e);
+                try {
+                    FileWriter w = new FileWriter(new java.io.File(getFilesDir(), "crash.log"), true);
+                    w.write(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())
+                            + " thread=" + t.getName() + "\n");
+                    w.write(Log.getStackTraceString(e));
+                    w.write("\n\n");
+                    w.flush();
+                    w.close();
+                } catch (IOException ignored) {
+                }
+                if (def != null) {
+                    def.uncaughtException(t, e);
+                }
+            }
+        });
     }
 
     private void createChannel() {
