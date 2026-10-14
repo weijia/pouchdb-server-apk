@@ -51,12 +51,15 @@ jobs:
 
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
+      with:
+        # 注意：不要再装 "tools" 包，新版 cmdline-tools 已移除它，会导致 sdkmanager 退出码 1
+        packages: platform-tools
 
-    - name: Install NDK and CMake
+    - name: Install SDK components
       run: |
         yes | sdkmanager --licenses > /dev/null || true
-        sdkmanager --install "ndk;25.2.9519653" "cmake;3.22.1" > /dev/null
-        sdkmanager --list_installed | grep -E "ndk|cmake" || true
+        sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;25.2.9519653" "cmake;3.22.1"
+        sdkmanager --list_installed | grep -E "platforms|build-tools|ndk|cmake" || true
 
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
