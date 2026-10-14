@@ -44,6 +44,13 @@ android {
     }
 
     buildTypes {
+        // 本地调试包使用独立 applicationId（net.weijia.pouchdbserver.debug），
+        // 避免与 CI 发布的 release 包（net.weijia.pouchdbserver）因签名不同
+        // 在“同名 package + 不同签名”时安装器报“与原有软件冲突”。
+        debug {
+            applicationIdSuffix ".debug"
+            debuggable true
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
