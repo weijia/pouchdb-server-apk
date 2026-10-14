@@ -116,43 +116,12 @@ jobs:
         fi
         ls -lh app/build/outputs/apk/${{ env.APK_TYPE }}/${{ steps.version.outputs.apk_name }}
 
-    # ========== 打 zip 包（上传用 zip 而不是裸 apk）==========
-    - name: Zip APK
-      run: |
-        cd app/build/outputs/apk/${{ env.APK_TYPE }}
-        zip -j "${{ steps.version.outputs.zip_name }}" "${{ steps.version.outputs.apk_name }}"
-        ls -lh "${{ steps.version.outputs.zip_name }}"
-
-    # ========== SFTP 上传 ==========
-    # 同时提供 zip（归档）与裸 apk（直接安装），避免“装了 zip 导致解析包错误”
-    - name: Upload APK (zip) to SFTP
-      if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-      uses: weijia/action-upload-sftp@master
-      with:
-        sftp-host: ${{ secrets.SFTP_HOST }}
-        sftp-port: ${{ secrets.SFTP_PORT }}
-        sftp-username: ${{ secrets.SFTP_USERNAME }}
-        sftp-password: ${{ secrets.SFTP_PASSWORD }}
-        source-path: app/build/outputs/apk/${{ env.APK_TYPE }}/${{ steps.version.outputs.zip_name }}
-        remote-path: /home/github/apps/pouchdb-server-apk/${{ steps.version.outputs.zip_name }}
-        cleanup-old-files: 'true'
-        max-keep-files: 5
-
-    - name: Upload raw APK to SFTP (direct install)
-      if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-      uses: weijia/action-upload-sftp@master
-      with:
-        sftp-host: ${{ secrets.SFTP_HOST }}
-        sftp-port: ${{ secrets.SFTP_PORT }}
-        sftp-username: ${{ secrets.SFTP_USERNAME }}
-        sftp-password: ${{ secrets.SFTP_PASSWORD }}
-        source-path: app/build/outputs/apk/${{ env.APK_TYPE }}/${{ steps.version.outputs.apk_name }}
-        remote-path: /home/github/apps/pouchdb-server-apk/${{ steps.version.outputs.apk_name }}
-        cleanup-old-files: 'false'
-
-    # ========== Artifact 上传 ==========
+    # ========== Artifact 上传（唯一分发源，已验证可安装）==========
+    # 注意：之前另有一条 SFTP 上传，会保留历史旧文件导致下载到旧/不同签名的包而无法安装。
+    # 现已移除，统一以 GitHub Actions Artifact 为唯一可信源（每次都是本次运行的最新构建）。
     - name: Upload APK (Artifact)
       uses: actions/upload-artifact@v4
       with:
         name: app-${{ env.APK_TYPE }}
         path: app/build/outputs/apk/${{ env.APK_TYPE }}/${{ steps.version.outputs.apk_name }}
+        retention-days: 90
