@@ -375,14 +375,15 @@ public class NodeService extends Service {
     private void callStartForeground(Notification notification) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // 参照 go-stock-server 参考实现使用 dataSync 标准前台服务类型
                 ServiceCompat.startForeground(this, NOTIFICATION_ID, notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
             } else {
                 ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, 0);
             }
         } catch (Throwable t) {
             Log.e(TAG, "startForeground 失败", t);
-            // 二次兜底：部分 ROM 对 specialUse 类型更严格，尝试不带类型再调一次
+            // 二次兜底：尝试不带类型再调一次
             try {
                 ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, 0);
             } catch (Throwable t2) {
