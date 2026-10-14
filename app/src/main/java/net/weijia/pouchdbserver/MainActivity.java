@@ -188,7 +188,15 @@ public class MainActivity extends Activity {
         executor.execute(new Runnable() {
             @Override
             public void run() {
-                final String log = tailLog();
+                StringBuilder sb = new StringBuilder();
+                sb.append("==== boot.log（启动步骤）====\n")
+                        .append(readTail(new File(getFilesDir(), "boot.log"), 6000));
+                sb.append("\n==== crash.log（崩溃堆栈）====\n")
+                        .append(readTail(new File(getFilesDir(), "crash.log"), 6000));
+                sb.append("\n==== server.log（Node 输出）====\n").append(tailLog());
+                sb.append("\n==== node.log（Node 原生输出）====\n")
+                        .append(readTail(new File(getFilesDir(), "node.log"), 6000));
+                final String log = sb.toString();
                 mainHandler.post(new Runnable() {
                     @Override
                     public void run() {
@@ -197,6 +205,24 @@ public class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    /** 读取文件尾部最多 max 字节，文件不存在时返回提示。 */
+    private String readTail(File file, int max) {
+        if (file == null || !file.exists()) {
+            return "（无）";
+        }
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            long length = raf.length();
+            int size = (int) Math.min(length, max);
+            if (size <= 0) return "（空）";
+            raf.seek(length - size);
+            byte[] buf = new byte[size];
+            raf.readFully(buf);
+            return new String(buf, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return "读取失败: " + e.getMessage();
+        }
     }
 
     private String tailLog() {

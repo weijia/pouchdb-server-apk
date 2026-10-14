@@ -17,6 +17,9 @@ extern "C" int startNode(int argc, char *argv[]) {
 
 static const char *TAG = "PouchDBServer";
 
+// 可选：把 node 的 stdout/stderr 同时落盘到文件，便于崩溃排查
+static FILE *g_logfp = NULL;
+
 int start_redirecting_stdout_stderr();
 
 extern "C"
@@ -26,7 +29,18 @@ Java_net_weijia_pouchdbserver_NodeBridge_startNodeWithArguments(
         jobject /* this */,
         jobjectArray arguments,
         jstring nodePath,
-        jboolean redirectOutputToLogcat) {
+        jboolean redirectOutputToLogcat,
+        jstring logFile) {
+
+    // 若传入日志文件路径，则打开追加写入；node 输出会同时写 logcat 与该文件
+    if (logFile != NULL) {
+        const char *lf = env->GetStringUTFChars(logFile, 0);
+        g_logfp = fopen(lf, "a");
+        if (g_logfp == NULL) {
+            __android_log_print(ANDROID_LOG_WARN, TAG, "无法打开日志文件: %s", lf);
+        }
+        env->ReleaseStringUTFChars(logFile, lf);
+    }
 
     // Node 的 libuv 要求参数位于连续内存
     const char *path = env->GetStringUTFChars(nodePath, 0);
@@ -56,7 +70,7 @@ Java_net_weijia_pouchdbserver_NodeBridge_startNodeWithArguments(
         env->ReleaseStringUTFChars(arg, str);
     }
 
-    if (redirectOutputToLogcat == JNI_TRUE) {
+    if (redirectOutputToLogcat == JNI_TRUE || g_logfp != NULL) {
         if (start_redirecting_stdout_stderr() == -1) {
             __android_log_write(ANDROID_LOG_ERROR, TAG,
                                 "Couldn't start redirecting stdout and stderr to logcat.");
@@ -69,11 +83,16 @@ Java_net_weijia_pouchdbserver_NodeBridge_startNodeWithArguments(
     free(argv);
 
     __android_log_print(ANDROID_LOG_INFO, TAG, "node exited with code %d", result);
+    if (g_logfp != NULL) {
+        fflush(g_logfp);
+        fclose(g_logfp);
+        g_logfp = NULL;
+    }
     return jint(result);
 }
 
 /**
- * 把 stdout / stderr 重定向到 logcat
+ * 把 stdout / stderr 重定向到 logcat（以及可选文件）
  */
 int pipe_stdout[2];
 int pipe_stderr[2];
@@ -89,6 +108,11 @@ void redirect(int pipe, int log_level) {
         }
         buf[redirect_size] = 0;
         __android_log_write(log_level, TAG, buf);
+        if (g_logfp != NULL) {
+            fputs(buf, g_logfp);
+            fputc('\n', g_logfp);
+            fflush(g_logfp);
+        }
     }
 }
 

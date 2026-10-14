@@ -26,5 +26,6 @@ public final class NodeBridge {
     public static native int startNodeWithArguments(
             String[] arguments,
             String nodePath,
-            boolean redirectOutputToLogcat);
+            boolean redirectOutputToLogcat,
+            String logFilePath);
 }
