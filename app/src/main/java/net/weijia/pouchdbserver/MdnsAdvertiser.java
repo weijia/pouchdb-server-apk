@@ -72,7 +72,7 @@ public final class MdnsAdvertiser {
         handler.removeCallbacks(selfHeal);
         unregister();
         releaseMulticastLock();
-        notify("stopped", "");
+        notifyState("stopped", "");
     }
 
     /** 端口变化时调用，内部会重新宣告。 */
@@ -89,7 +89,7 @@ public final class MdnsAdvertiser {
 
     private void register() {
         if (nsdManager == null) {
-            notify("error", "NsdManager 不可用");
+            notifyState("error", "NsdManager 不可用");
             return;
         }
         NsdServiceInfo info = new NsdServiceInfo();
@@ -110,11 +110,11 @@ public final class MdnsAdvertiser {
                     // 名字冲突：加后缀重试
                     retryCount++;
                     instanceName = instanceName + "-" + retryCount;
-                    notify("conflict", "实例名冲突，改用 " + instanceName);
+                    notifyState("conflict", "实例名冲突，改用 " + instanceName);
                     register();
                     return;
                 }
-                notify("error", "注册失败 code=" + errorCode);
+                notifyState("error", "注册失败 code=" + errorCode);
             }
 
             @Override
@@ -126,7 +126,7 @@ public final class MdnsAdvertiser {
             public void onServiceRegistered(NsdServiceInfo serviceInfo) {
                 registered = true;
                 Log.i(TAG, "已注册: " + serviceInfo.getServiceName() + " " + SERVICE_TYPE + ":" + port);
-                notify("registered", serviceInfo.getServiceName() + "." + SERVICE_TYPE);
+                notifyState("registered", serviceInfo.getServiceName() + "." + SERVICE_TYPE);
             }
 
             @Override
@@ -137,9 +137,9 @@ public final class MdnsAdvertiser {
 
         try {
             nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, registrationListener);
-            notify("registering", instanceName + "." + SERVICE_TYPE);
+            notifyState("registering", instanceName + "." + SERVICE_TYPE);
         } catch (Exception e) {
-            notify("error", e.getMessage());
+            notifyState("error", e.getMessage());
         }
     }
 
@@ -189,7 +189,8 @@ public final class MdnsAdvertiser {
         }
     }
 
-    private void notify(String state, String detail) {
+    // 注意：不要命名为 notify()/notifyAll()，会与 Object 的 final 方法在内部类中冲突
+    private void notifyState(String state, String detail) {
         if (callback != null) {
             callback.onState(state, detail);
         }

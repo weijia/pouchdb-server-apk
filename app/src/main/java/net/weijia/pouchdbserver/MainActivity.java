@@ -17,6 +17,7 @@ import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -147,11 +148,14 @@ public class MainActivity extends Activity {
                     final boolean up = status.optBoolean("running", false);
                     final int port = status.optInt("port", prefs.getPort());
                     StringBuilder dbs = new StringBuilder();
-                    for (int i = 0; i < status.optJSONArray("databases").length(); i++) {
-                        JSONObject item = status.optJSONArray("databases").optJSONObject(i);
-                        if (item == null) continue;
-                        if (dbs.length() > 0) dbs.append(", ");
-                        dbs.append(item.optString("name", "?"));
+                    JSONArray dbArray = status.optJSONArray("databases");
+                    if (dbArray != null) {
+                        for (int i = 0; i < dbArray.length(); i++) {
+                            JSONObject item = dbArray.optJSONObject(i);
+                            if (item == null) continue;
+                            if (dbs.length() > 0) dbs.append(", ");
+                            dbs.append(item.optString("name", "?"));
+                        }
                     }
                     final String ip = NetUtils.getLanIp(MainActivity.this);
                     final String dbText = dbs.toString();
