@@ -87,7 +87,8 @@ public class MainActivity extends Activity {
             }
         });
 
-        requestNotificationPermissionIfNeeded();
+        // 打开即尝试拉起前台服务：已授权直接启动，未授权先弹申请，授权后再启动
+        maybeAutoStart();
     }
 
     @Override
@@ -230,6 +231,35 @@ public class MainActivity extends Activity {
         btnToggle.setText(isRunning ? "停止服务" : "启动服务");
     }
 
+    /** 已获通知权限（Android 12 及以下默认视为已授权）。 */
+    private boolean hasNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                    == PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
+
+    /** 打开应用时尝试拉起服务：已授权直接启动，未授权先弹申请。 */
+    private void maybeAutoStart() {
+        if (hasNotificationPermission()) {
+            autoStartService();
+        } else {
+            requestNotificationPermissionIfNeeded();
+        }
+    }
+
+    private void autoStartService() {
+        Intent intent = new Intent(this, NodeService.class);
+        intent.setAction(NodeService.ACTION_START);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
+        Toast.makeText(this, "正在启动服务（状态栏将出现常驻通知）", Toast.LENGTH_SHORT).show();
+    }
+
     private void requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
@@ -257,9 +287,15 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions,
                                            int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQ_NOTIFICATION && grantResults.length > 0
-                && grantResults[0] != PackageManager.PERMISSION_GRANTED) {
-            Toast.makeText(this, "未授予通知权限，前台服务通知将不可见", Toast.LENGTH_SHORT).show();
+        if (requestCode == REQ_NOTIFICATION) {
+            if (grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                // 授权后立刻拉起前台服务：状态栏出现常驻通知，可随时点开回到应用
+                autoStartService();
+            } else {
+                Toast.makeText(this, "未授予通知权限，前台服务通知不可见，无法自动启动",
+                        Toast.LENGTH_SHORT).show();
+            }
         }
     }
 }
