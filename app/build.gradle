@@ -11,7 +11,7 @@ android {
         applicationId 'net.weijia.pouchdbserver'
         minSdk 24            // nodejs-mobile 要求 API 24+
         targetSdk 34
-        versionCode 7
+        versionCode 8
         versionName '1.0.0'
 
         ndk {
