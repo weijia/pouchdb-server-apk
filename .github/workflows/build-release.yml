@@ -3,10 +3,8 @@ name: Build APK and Upload to SFTP
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   build-and-upload:
@@ -66,23 +64,21 @@ jobs:
       with:
         gradle-version: '7.5'
 
-    # ========== 版本号处理 ==========
-    - name: Update versionCode before build
+    # ========== 版本号处理（参照 go-stock-server：从 git tag / run_number 计算，交由 Gradle 读取）==========
+    - name: Compute version
       id: version
       run: |
-        # build.gradle 里可能用单引号或双引号，这里两种都兼容
-        VERSION_NAME=$(grep -m1 "versionName" app/build.gradle | sed -E "s/.*versionName +['\"]([^'\"]+)['\"].*/\1/")
-        if ! echo "$VERSION_NAME" | grep -qE "^[0-9]+\.[0-9]+"; then
-          VERSION_NAME=$(grep -m1 -oE "[0-9]+\.[0-9]+\.[0-9]+" app/build.gradle || echo "1.0.0")
+        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          VERSION="${GITHUB_REF_NAME#v}"
+        else
+          VERSION="ci-${GITHUB_RUN_NUMBER}"
         fi
-        echo "versionName=${VERSION_NAME}"
-        BUILD_NUMBER=${{ github.run_number }}
-        sed -i "s/versionCode [0-9]*/versionCode ${BUILD_NUMBER}/" app/build.gradle
-        echo "Updated versionCode:"
-        grep "versionCode" app/build.gradle
-        echo "version_name=${VERSION_NAME}" >> $GITHUB_OUTPUT
-        echo "build_number=${BUILD_NUMBER}" >> $GITHUB_OUTPUT
-        echo "apk_name=pouchdb-server-apk-v${VERSION_NAME}-build${BUILD_NUMBER}.apk" >> $GITHUB_OUTPUT
+        echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+        APK_NAME="pouchdb-server-apk-${VERSION}-build${GITHUB_RUN_NUMBER}.apk"
+        echo "apk_name=${APK_NAME}" >> "$GITHUB_OUTPUT"
+        echo "version_name=${VERSION}" >> "$GITHUB_OUTPUT"
+        echo "version_code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
     # ========== 签名 + 构建 ==========
     - name: Setup Release Keystore and Build
@@ -91,6 +87,8 @@ jobs:
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        VERSION_CODE: ${{ env.VERSION_CODE }}
+        VERSION_NAME: ${{ env.VERSION }}
       run: |
         if [ -n "$KEYSTORE_BASE64" ]; then
           echo "Building Release APK with keystore..."
@@ -118,7 +116,7 @@ jobs:
 
     # ========== SFTP 上传 ==========
     - name: Upload APK to SFTP
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
       uses: weijia/action-upload-sftp@master
       with:
         sftp-host: ${{ secrets.SFTP_HOST }}
@@ -136,13 +134,3 @@ jobs:
       with:
         name: app-${{ env.APK_TYPE }}
         path: app/build/outputs/apk/${{ env.APK_TYPE }}/${{ steps.version.outputs.apk_name }}
-
-    # ========== 提交 versionCode 更新 ==========
-    - name: Commit versionCode update
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      run: |
-        git config user.name "GitHub Actions"
-        git config user.email "actions@github.com"
-        git add app/build.gradle
-        git commit -m "[skip ci] Update versionCode to ${{ steps.version.outputs.build_number }}" || echo "No changes to commit"
-        git push origin HEAD:main

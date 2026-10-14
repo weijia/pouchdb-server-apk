@@ -11,8 +11,12 @@ android {
         applicationId 'net.weijia.pouchdbserver'
         minSdk 24            // nodejs-mobile 要求 API 24+
         targetSdk 34
-        versionCode 8
-        versionName '1.0.0'
+        // 版本号由 CI 通过环境变量注入（参照 go-stock-server）；
+        // 本地构建无环境变量时使用默认值。
+        def vCode = (System.getenv("VERSION_CODE") ?: "1").toInteger()
+        def vName = System.getenv("VERSION_NAME") ?: "1.0.0"
+        versionCode vCode
+        versionName vName
 
         ndk {
             // 只保留移动设备主流架构，x86_64 会显著增大 APK

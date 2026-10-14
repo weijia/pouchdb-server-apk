@@ -80,6 +80,10 @@ public class NodeService extends Service {
         port = prefs.getPort();
         controlPort = prefs.getControlPort();
         createChannel();
+        // 参照 go-stock-server：service 一创建就立即 startForeground，
+        // 避免“服务已创建但还没挂前台通知”的窗口（Android 12+ 会直接杀进程，
+        // 表现为 App 闪退/最小化、通知栏看不到）。
+        startForegroundNotification("正在启动 PouchDB 服务…");
         mdnsAdvertiser = new MdnsAdvertiser(this, new MdnsAdvertiser.Callback() {
             @Override
             public void onState(String state, String detail) {
@@ -304,7 +308,7 @@ public class NodeService extends Service {
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID, "PouchDB Server", NotificationManager.IMPORTANCE_LOW);
+                    CHANNEL_ID, "PouchDB Server", NotificationManager.IMPORTANCE_DEFAULT);
             channel.setDescription("CouchDB 兼容服务运行状态");
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm != null) {
@@ -352,6 +356,7 @@ public class NodeService extends Service {
                 .setContentIntent(pi)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
                 .build();
     }
 
