@@ -39,7 +39,7 @@ import java.util.concurrent.Executors;
 public class NodeService extends Service {
 
     private static final String TAG = "NodeService";
-    private static final String CHANNEL_ID = "pouchdb_server";
+    private static final String CHANNEL_ID = App.CHANNEL_ID;
     private static final int NOTIFICATION_ID = 5984;
     private static final long POLL_INTERVAL_MS = 5000;
 
@@ -62,6 +62,7 @@ public class NodeService extends Service {
 
     private Thread nodeThread;
     private boolean nodeStarted;
+    private volatile boolean stopping;
     private int port;
     private int controlPort;
 
@@ -79,17 +80,17 @@ public class NodeService extends Service {
         prefs = new Prefs(this);
         port = prefs.getPort();
         controlPort = prefs.getControlPort();
+        // 渠道已在 App.onCreate 建立；这里再确保一次（保险）。
         createChannel();
-        // 参照 go-stock-server：service 一创建就立即 startForeground，
-        // 避免“服务已创建但还没挂前台通知”的窗口（Android 12+ 会直接杀进程，
-        // 表现为 App 闪退/最小化、通知栏看不到）。
-        startForegroundNotification("正在启动 PouchDB 服务…");
-        mdnsAdvertiser = new MdnsAdvertiser(this, new MdnsAdvertiser.Callback() {
-            @Override
-            public void onState(String state, String detail) {
-                Log.i(TAG, "mDNS: " + state + " " + detail);
-            }
-        });
+        // 仿 go-stock-server：onCreate 内首先 startForeground，且包在 try/catch 里。
+        // 这样即便后续任何初始化抛异常，也不会出现“服务创建失败→系统杀进程”的连锁，
+        // 也不会让前台通知凭空消失。
+        try {
+            startForegroundNotification("正在启动 PouchDB 服务…");
+        } catch (Throwable t) {
+            Log.e(TAG, "startForeground 失败", t);
+        }
+        // 注意：mDNS 初始化移到 startServer() 里，避免 onCreate 抛异常。
     }
 
     @Override
@@ -121,8 +122,22 @@ public class NodeService extends Service {
     // ==================== 启动流程 ====================
 
     private void startServer() {
+        stopping = false;
         startForegroundNotification("正在启动 Node 运行时...");
         mainHandler.removeCallbacks(pollRunnable);
+        // mDNS 初始化放这里（不在 onCreate），并且兜底捕获，避免任何异常影响前台状态。
+        try {
+            if (mdnsAdvertiser == null) {
+                mdnsAdvertiser = new MdnsAdvertiser(this, new MdnsAdvertiser.Callback() {
+                    @Override
+                    public void onState(String state, String detail) {
+                        Log.i(TAG, "mDNS: " + state + " " + detail);
+                    }
+                });
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "mDNS 初始化失败（不影响主服务）", t);
+        }
 
         executor.execute(new Runnable() {
             @Override
@@ -187,6 +202,16 @@ public class NodeService extends Service {
                 Log.i(TAG, "启动 Node: " + mainJs.getAbsolutePath());
                 int code = NodeBridge.startNodeWithArguments(args, projectDir.getAbsolutePath(), true);
                 Log.i(TAG, "Node 退出，code=" + code);
+                nodeStarted = false;
+                // 非主动停止时，延迟自动重启，避免 Node 异常退出后服务彻底停摆
+                if (!stopping) {
+                    mainHandler.postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (!stopping && !nodeStarted) startServer();
+                        }
+                    }, 3000);
+                }
             }
         }, "node-runtime");
         nodeThread.setDaemon(true);
@@ -273,6 +298,7 @@ public class NodeService extends Service {
     // ==================== 停止流程 ====================
 
     private void stopServer() {
+        stopping = true;
         executor.execute(new Runnable() {
             @Override
             public void run() {
@@ -307,13 +333,14 @@ public class NodeService extends Service {
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm == null) return;
+            if (nm.getNotificationChannel(CHANNEL_ID) != null) return; // 已存在则不覆盖（避免降权）
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID, "PouchDB Server", NotificationManager.IMPORTANCE_DEFAULT);
             channel.setDescription("CouchDB 兼容服务运行状态");
-            NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm != null) {
-                nm.createNotificationChannel(channel);
-            }
+            channel.setShowBadge(false);
+            nm.createNotificationChannel(channel);
         }
     }
 
@@ -354,6 +381,8 @@ public class NodeService extends Service {
                 .setSubText(sub)
                 .setSmallIcon(R.drawable.ic_stat_server)
                 .setContentIntent(pi)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT)
