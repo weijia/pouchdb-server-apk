@@ -70,7 +70,12 @@ jobs:
     - name: Update versionCode before build
       id: version
       run: |
-        VERSION_NAME=$(grep "versionName" app/build.gradle | head -1 | sed 's/.*versionName *"\([^"]*\)".*/\1/')
+        # build.gradle 里可能用单引号或双引号，这里两种都兼容
+        VERSION_NAME=$(grep -m1 "versionName" app/build.gradle | sed -E "s/.*versionName +['\"]([^'\"]+)['\"].*/\1/")
+        if ! echo "$VERSION_NAME" | grep -qE "^[0-9]+\.[0-9]+"; then
+          VERSION_NAME=$(grep -m1 -oE "[0-9]+\.[0-9]+\.[0-9]+" app/build.gradle || echo "1.0.0")
+        fi
+        echo "versionName=${VERSION_NAME}"
         BUILD_NUMBER=${{ github.run_number }}
         sed -i "s/versionCode [0-9]*/versionCode ${BUILD_NUMBER}/" app/build.gradle
         echo "Updated versionCode:"
