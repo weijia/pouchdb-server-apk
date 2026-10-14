@@ -52,8 +52,9 @@ android {
         pickFirst 'lib/*/libc++_shared.so'
     }
 
-    // assets 里包含完整 node_modules（数千个 js 文件）。
-    // 不禁用压缩：压缩后 APK 从 ~110MB 降到 ~50MB，首次启动时解压的开销可接受。
+    // assets 里包含完整 node_modules（数千个 js 文件），保持压缩状态可小约 10MB。
+    // APK 体积的大头是 libnative（libnode.so 两个 ABI），native 库在 APK 内不压缩，
+    // 若要进一步瘦身：只保留 arm64-v8a，或在 manifest 设 android:extractNativeLibs="false"。
 }
 
 dependencies {

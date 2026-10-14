@@ -103,6 +103,8 @@ PouchDB 的 `memory` adapter 不落盘，本项目用**快照**持久化：
 ## 已知限制
 
 - `minSdk 24`：nodejs-mobile 的构建要求
-- APK 体积较大：实测 debug APK 约 50MB（libnode.so 两个 ABI + 完整 node_modules）
+- APK 体积较大：实测 debug APK 约 100MB
+  - 构成：`libnode.so`（arm64-v8a + armeabi-v7a，native 库在 APK 内不压缩，约 60MB）+ node_modules（约 30MB）
+  - 可选瘦身：`abiFilters` 只保留 `arm64-v8a`（省约 25MB）；或 manifest 设 `android:extractNativeLibs="false"`（APK 再降约 30MB，安装后占用不变）
 - Android 15+ 的 16KB page size 设备上，`libnode.so v18.20.4` 未做 16KB 对齐可能无法加载
 - 默认无认证，请勿在不可信网络暴露（控制端口已限制为本机回环）
