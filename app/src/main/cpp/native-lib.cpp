@@ -30,10 +30,62 @@ extern int Start(int argc, char* argv[]);
 static char** g_argv = nullptr;
 static int g_argc = 0;
 
+// 缓存 JavaVM 与 NodeBridge 类的全局引用：Node 专用线程结束（node::Start 返回）时
+// 需要从 native 回调 Java 侧做自愈。该线程不是 JVM 已知线程，必须先 AttachCurrentThread。
+static JavaVM* g_vm = nullptr;
+static jclass g_bridge_class = nullptr;
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+    g_vm = vm;
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_VERSION_1_6;
+    }
+    jclass local = env->FindClass("net/weijia/pouchdbserver/NodeBridge");
+    if (local != nullptr) {
+        g_bridge_class = reinterpret_cast<jclass>(env->NewGlobalRef(local));
+        env->DeleteLocalRef(local);
+    } else {
+        LOGW("JNI_OnLoad: 未找到 NodeBridge 类，Node 退出回调不可用");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    return JNI_VERSION_1_6;
+}
+
+// Node 线程退出后通知 Java 侧（触发自愈重启）。任何失败都只记日志，不影响收尾。
+static void notify_node_exit(int code) {
+    if (g_vm == nullptr || g_bridge_class == nullptr) {
+        return;
+    }
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (g_vm->AttachCurrentThread(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) {
+            LOGW("notify_node_exit: AttachCurrentThread 失败");
+            return;
+        }
+        attached = true;
+    }
+    jmethodID mid = env->GetStaticMethodID(g_bridge_class, "onNodeExit", "(I)V");
+    if (mid != nullptr) {
+        env->CallStaticVoidMethod(g_bridge_class, mid, static_cast<jint>(code));
+    } else {
+        LOGW("notify_node_exit: 未找到 onNodeExit(I)V");
+    }
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+    if (attached) {
+        g_vm->DetachCurrentThread();
+    }
+}
+
 static void* node_thread_entry(void*) {
     LOGI("node thread start: argc=%d argv0=%s", g_argc, (g_argv && g_argv[0]) ? g_argv[0] : "(null)");
     int code = node::Start(g_argc, g_argv);
     LOGW("node::Start 返回 code=%d", code);
+    notify_node_exit(code);
     return nullptr;
 }
 

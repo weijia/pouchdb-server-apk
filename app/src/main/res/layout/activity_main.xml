@@ -12,7 +12,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Node APK Demo"
+            android:text="PouchDB Server"
             android:textAppearance="?android:attr/textAppearanceLarge"
             android:textStyle="bold" />
 

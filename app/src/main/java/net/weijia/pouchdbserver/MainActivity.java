@@ -17,6 +17,8 @@ import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.core.content.ContextCompat;
+
 import java.io.File;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
@@ -36,6 +38,7 @@ public class MainActivity extends Activity {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private boolean running;
+    private boolean receiverRegistered;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
@@ -75,15 +78,52 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        IntentFilter filter = new IntentFilter(NodeService.ACTION_STATE);
-        registerReceiver(receiver, filter);
+        registerStateReceiver();
         refreshLog();
     }
 
     @Override
     protected void onPause() {
-        unregisterReceiver(receiver);
+        unregisterStateReceiver();
         super.onPause();
+    }
+
+    /**
+     * 动态注册状态广播。
+     *
+     * 关键修复（崩溃根因）：从 Android 14（targetSdk 34）起，应用为「非系统广播」
+     * 动态注册接收器时必须显式声明导出标志，否则 registerReceiver 会抛
+     * SecurityException。此前本方法在 onResume 里裸调 registerReceiver，
+     * 于是 App 一打开就崩，表现为「运行后直接退出」。
+     *
+     * 现在统一走 ContextCompat.registerReceiver + RECEIVER_NOT_EXPORTED，
+     * 并对任何 Throwable 兜底，注册失败也不让界面进程崩溃。
+     */
+    private void registerStateReceiver() {
+        if (receiverRegistered) {
+            return;
+        }
+        try {
+            IntentFilter filter = new IntentFilter(NodeService.ACTION_STATE);
+            ContextCompat.registerReceiver(this, receiver, filter,
+                    ContextCompat.RECEIVER_NOT_EXPORTED);
+            receiverRegistered = true;
+        } catch (Throwable t) {
+            Log.e(TAG, "注册状态广播失败（已忽略，避免界面崩溃）", t);
+        }
+    }
+
+    private void unregisterStateReceiver() {
+        if (!receiverRegistered) {
+            return;
+        }
+        try {
+            unregisterReceiver(receiver);
+        } catch (Throwable t) {
+            Log.w(TAG, "注销状态广播异常（已忽略）", t);
+        } finally {
+            receiverRegistered = false;
+        }
     }
 
     @Override

@@ -5,12 +5,14 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
@@ -54,6 +56,43 @@ public class NodeService extends Service {
 
     private boolean nodeStarted;
     private volatile boolean stopping;
+    private long startAtMs;
+
+    // ==================== 异常退出防护（自愈）====================
+    // Node 现在按官方姿势进程内嵌在 :node 进程里，node::Start 一旦返回（Node 崩溃/退出）
+    // 或 Node 卡死（心跳停止），都必须能被发现并自愈重启，否则服务会"静默死掉"。
+    //   1) native 侧在 node::Start 返回时回调 NodeBridge.onNodeExit；
+    //   2) Java 侧 Watchdog 周期检查 Node 写出的 heartbeat 文件是否过期。
+    // 两条路都汇聚到 handleNodeDown()：结束当前 :node 进程，交给系统按 START_STICKY 重建。
+    private static final String WATCHDOG_PREFS = "node_watchdog";
+    private static final String KEY_QUICK_EXIT_STREAK = "quick_exit_streak";
+    /** 启动后多久内退出算"秒退"（用于崩溃循环保护） */
+    private static final long QUICK_EXIT_MS = 20_000;
+    /** 连续秒退达到该次数即暂停自愈，避免无限重启 */
+    private static final int MAX_QUICK_EXITS = 6;
+    private static final long WATCHDOG_INTERVAL_MS = 30_000;
+    /** 心跳过期阈值：远大于 Node 10s 一次的心跳间隔 */
+    private static final long HEARTBEAT_STALE_MS = 90_000;
+
+    private final Runnable watchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (!nodeStarted || stopping) {
+                return;
+            }
+            try {
+                File hb = new File(nodeDataDir(), "heartbeat");
+                long age = System.currentTimeMillis() - hb.lastModified();
+                if (hb.exists() && age > HEARTBEAT_STALE_MS) {
+                    handleNodeDown("心跳过期(" + age + "ms)", -1);
+                    return;
+                }
+            } catch (Throwable t) {
+                bootLog("Watchdog 检查异常: " + t);
+            }
+            mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS);
+        }
+    };
 
     @Override
     public void onCreate() {
@@ -84,6 +123,17 @@ public class NodeService extends Service {
             stopServer();
             return START_NOT_STICKY;
         }
+        // 崩溃循环保护：若 Node 在极短时间内连续"秒退"多次，说明存在需要人工排查
+        // 的问题（依赖缺失、libnode 不兼容等）。此时不再自愈重启，避免无限重启把
+        // 电量/CPU 打满，同时把计数清零，让用户手动重开时还能再试一次。
+        int streak = watchdogPrefs().getInt(KEY_QUICK_EXIT_STREAK, 0);
+        if (streak >= MAX_QUICK_EXITS) {
+            bootLog("Node 连续快速退出 streak=" + streak + "，暂停自愈（请排查依赖/libnode）");
+            watchdogPrefs().edit().putInt(KEY_QUICK_EXIT_STREAK, 0).apply();
+            broadcast(false, false, "服务反复启动失败，已暂停自愈，请排查日志");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         startServer();
         return START_STICKY;
     }
@@ -96,6 +146,8 @@ public class NodeService extends Service {
     @Override
     public void onDestroy() {
         nodeStarted = false;
+        mainHandler.removeCallbacks(watchdog);
+        NodeBridge.clearNodeExitListener();
         executor.shutdownNow();
         super.onDestroy();
     }
@@ -104,28 +156,45 @@ public class NodeService extends Service {
 
     private void startServer() {
         stopping = false;
-        startForegroundNotification("正在启动 Node 运行时…");
+        startAtMs = SystemClock.elapsedRealtime();
+        startForegroundNotification("正在启动 CouchDB 兼容服务…");
         executor.execute(new Runnable() {
             @Override
             public void run() {
                 try {
                     File projectDir = prepareNodeProject();
                     startNode(projectDir);
-                    broadcast(true, true, "Node 运行中（hello world）");
+                    broadcast(true, true, "CouchDB 兼容服务运行中（:5984）");
+                    // Node 起来后才开 Watchdog，且延后一轮再检查心跳，
+                    // 避免 Node 首次写心跳前被误判为死亡。
+                    mainHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS);
                 } catch (Throwable e) {
                     Log.e(TAG, "启动失败", e);
                     bootLog("启动失败: " + Log.getStackTraceString(e));
                     broadcast(false, false, "启动失败: " + e.getMessage());
+                    // 启动阶段就失败也要计入秒退，交给崩溃循环保护兜底。
+                    handleNodeDown("启动失败", -2);
                 }
             }
         });
     }
 
+    /** Node 数据目录（与 --data-dir 保持一致），Node 在其中写 server.json / heartbeat。 */
+    private File nodeDataDir() {
+        return new File(getFilesDir(), "data");
+    }
+
+    private SharedPreferences watchdogPrefs() {
+        return getSharedPreferences(WATCHDOG_PREFS, MODE_PRIVATE);
+    }
+
     /** 把 assets 里的 node 工程复制到私有目录（Node 无法直接执行 assets 里的脚本）。 */
     private File prepareNodeProject() throws IOException {
         File projectDir = new File(getFilesDir(), "nodejs-project");
-        String assetStamp = readAssetText("nodejs-project/.buildstamp");
-        File stampFile = new File(projectDir, ".buildstamp");
+        // 注意：构建标记不要用 .buildstamp 这类点开头文件名，aapt 打包 assets 时
+        // 不保证收录点文件；一旦取不到标记就会每次启动都重拷 node_modules（很慢）。
+        String assetStamp = readAssetText("nodejs-project/buildstamp");
+        File stampFile = new File(projectDir, "buildstamp");
         if (stampFile.exists() && assetStamp != null
                 && assetStamp.equals(readFileText(stampFile))) {
             return projectDir;
@@ -140,9 +209,11 @@ public class NodeService extends Service {
      * 按官方姿势启动 Node：JNI 在专用线程上调 node::Start()。
      * 关键点：
      *   1) argv[0] 约定为 "node"，argv[1] 为脚本路径；
-     *   2) TMPDIR 指向 CacheDir（Android 无 /tmp，官方插件明确设置，之前我们漏了）；
-     *   3) NODE_PATH 指向工程目录，供 require() 解析模块；
-     *   4) 通过 --log-file 让 Node 把输出写进文件，界面才能看到（stdout 在安卓上不可见）。
+     *   2) TMPDIR 指向 CacheDir（Android 无 /tmp，官方插件明确设置）；
+     *   3) NODE_PATH 指向工程目录，供 require() 解析 node_modules；
+     *   4) 通过 argv 把完整服务参数传进去（安卓侧 JNI 无法设置环境变量）：
+     *      --data-dir 数据目录、--port/--control-port 监听端口、--log-file 日志文件；
+     *   5) 注册 Node 退出回调，node::Start 一旦返回即触发自愈。
      */
     private void startNode(File projectDir) throws IOException {
         File mainJs = new File(projectDir, "main.js");
@@ -150,14 +221,34 @@ public class NodeService extends Service {
             throw new IOException("main.js 不存在: " + mainJs.getAbsolutePath());
         }
 
+        File dataDir = nodeDataDir();
+        dataDir.mkdirs();
+
         File logFile = new File(getFilesDir(), "node.log");
         if (logFile.exists()) {
             logFile.delete();
         }
+        // 清掉上一轮遗留的心跳，避免 Watchdog 把旧心跳误判为"当前存活/或已过期"。
+        File heartbeat = new File(dataDir, "heartbeat");
+        if (heartbeat.exists()) {
+            heartbeat.delete();
+        }
+
+        // node::Start 返回（Node 进程结束）→ 回调 → 自愈重启
+        NodeBridge.setNodeExitListener(new NodeBridge.NodeExitListener() {
+            @Override
+            public void onNodeExit(int code) {
+                handleNodeDown("node::Start 返回", code);
+            }
+        });
 
         String[] argv = new String[]{
                 "node",
                 mainJs.getAbsolutePath(),
+                "--data-dir=" + dataDir.getAbsolutePath(),
+                "--port=" + Prefs.DEFAULT_PORT,
+                "--control-port=" + Prefs.DEFAULT_CONTROL_PORT,
+                "--instance=pouchdb-server",
                 "--log-file=" + logFile.getAbsolutePath(),
         };
 
@@ -165,6 +256,7 @@ public class NodeService extends Service {
         String nodePath = projectDir.getAbsolutePath();
 
         bootLog("startNode: mainJs=" + mainJs.getAbsolutePath()
+                + " dataDir=" + dataDir.getAbsolutePath()
                 + " tmpDir=" + tmpDir + " nodePath=" + nodePath);
 
         try {
@@ -182,6 +274,8 @@ public class NodeService extends Service {
     private void stopServer() {
         stopping = true;
         nodeStarted = false;
+        mainHandler.removeCallbacks(watchdog);
+        NodeBridge.clearNodeExitListener();
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -193,6 +287,51 @@ public class NodeService extends Service {
                 stopSelf();
             }
         });
+    }
+
+    // ==================== 自愈 ====================
+
+    /**
+     * 统一的「Node 不可用」处理入口（native 退出回调 / Watchdog 心跳过期 / 启动失败）。
+     * 记录 uptime 与连续秒退次数，然后结束当前 :node 进程：
+     * 由于 onStartCommand 返回 START_STICKY，系统会以新进程重建服务，
+     * 从而重新调用 node::Start（同一进程内不可二次调用 node::Start，故必须重启进程）。
+     */
+    private void handleNodeDown(String reason, int code) {
+        if (stopping) {
+            return;
+        }
+        stopping = true;
+        nodeStarted = false;
+
+        long uptime = startAtMs > 0 ? (SystemClock.elapsedRealtime() - startAtMs) : 0;
+        int streak = uptime < QUICK_EXIT_MS ? (readStreak() + 1) : 0;
+        writeStreak(streak);
+
+        bootLog("Node 不可用[" + reason + "] code=" + code
+                + " uptime=" + uptime + "ms streak=" + streak);
+
+        mainHandler.removeCallbacks(watchdog);
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (streak >= MAX_QUICK_EXITS) {
+                    watchdogPrefs().edit().putInt(KEY_QUICK_EXIT_STREAK, 0).apply();
+                    broadcast(false, false, "服务反复异常，已暂停自愈，请排查日志");
+                } else {
+                    broadcast(false, false, "服务异常，正在自愈重启…");
+                }
+                stopSelf();
+            }
+        });
+    }
+
+    private int readStreak() {
+        return watchdogPrefs().getInt(KEY_QUICK_EXIT_STREAK, 0);
+    }
+
+    private void writeStreak(int streak) {
+        watchdogPrefs().edit().putInt(KEY_QUICK_EXIT_STREAK, streak).apply();
     }
 
     // ==================== 通知 ====================
@@ -247,7 +386,7 @@ public class NodeService extends Service {
     private Notification buildSafeNotification(String message) {
         try {
             NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
-                    .setContentTitle("Node APK Demo")
+                    .setContentTitle("PouchDB Server")
                     .setContentText(message)
                     .setOngoing(true)
                     .setPriority(NotificationCompat.PRIORITY_DEFAULT)
