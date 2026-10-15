@@ -59,8 +59,10 @@ static void notify_node_exit(int code) {
     }
     JNIEnv* env = nullptr;
     bool attached = false;
+    // 注意 NDK 的 jni.h 里这两个包装函数签名并不一致：
+    // GetEnv 取 void**，AttachCurrentThread 取 JNIEnv**（别硬转 void**，会编译不过）。
     if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
-        if (g_vm->AttachCurrentThread(reinterpret_cast<void**>(&env), nullptr) != JNI_OK) {
+        if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
             LOGW("notify_node_exit: AttachCurrentThread 失败");
             return;
         }
