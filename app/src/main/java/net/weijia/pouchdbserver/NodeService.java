@@ -55,6 +55,7 @@ public class NodeService extends Service {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private boolean nodeStarted;
+    private volatile boolean starting;
     private volatile boolean stopping;
     private long startAtMs;
 
@@ -134,6 +135,15 @@ public class NodeService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
+        // Node 是进程级单例：nodejs-mobile 官方明确「只有第一次 start 有效，后续调用
+        // 不会再启动新的 Node 线程」。因此必须忽略重复的启动请求——否则第二次调用会
+        // 变成空操作，而服务仍上报「Node 已在专用线程启动」，排查时极具误导性。
+        if (starting || nodeStarted) {
+            bootLog("忽略重复启动请求(starting=" + starting + ", nodeStarted=" + nodeStarted + ")");
+            broadcast(true, nodeStarted, nodeStarted
+                    ? "CouchDB 兼容服务运行中（:5984）" : "正在启动…");
+            return START_STICKY;
+        }
         startServer();
         return START_STICKY;
     }
@@ -156,6 +166,7 @@ public class NodeService extends Service {
 
     private void startServer() {
         stopping = false;
+        starting = true;
         startAtMs = SystemClock.elapsedRealtime();
         startForegroundNotification("正在启动 CouchDB 兼容服务…");
         executor.execute(new Runnable() {
@@ -167,6 +178,7 @@ public class NodeService extends Service {
                     broadcast(true, true, "CouchDB 兼容服务运行中（:5984）");
                     // Node 起来后才开 Watchdog，且延后一轮再检查心跳，
                     // 避免 Node 首次写心跳前被误判为死亡。
+                    starting = false;
                     mainHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS);
                 } catch (Throwable e) {
                     Log.e(TAG, "启动失败", e);
@@ -273,6 +285,7 @@ public class NodeService extends Service {
 
     private void stopServer() {
         stopping = true;
+        starting = false;
         nodeStarted = false;
         mainHandler.removeCallbacks(watchdog);
         NodeBridge.clearNodeExitListener();
@@ -302,6 +315,7 @@ public class NodeService extends Service {
             return;
         }
         stopping = true;
+        starting = false;
         nodeStarted = false;
 
         long uptime = startAtMs > 0 ? (SystemClock.elapsedRealtime() - startAtMs) : 0;

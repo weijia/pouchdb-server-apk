@@ -9,6 +9,24 @@
 //   2) 控制端口（默认 5985，仅 127.0.0.1）— 供 Android 侧启停数据端口，
 //      因为数据端口关闭后就再也无法用 HTTP 自我唤醒，必须有一个常驻通道。
 
+// 最早落盘的启动诊断：只用内置模块，不依赖任何第三方库。这样即使后面某个 require
+// 失败、或按 nodejs-mobile 单例语义 node::Start 根本没把脚本跑起来，也能在 node.log
+// 里区分「脚本压根没执行」与「脚本执行了但启动报错」——否则只能对着空日志猜。
+(function earlyBootMarker() {
+  try {
+    const logArg = process.argv.slice(2).find((a) => a.indexOf('--log-file=') === 0);
+    if (!logArg) return;
+    const logFile = logArg.slice('--log-file='.length);
+    const fsMod = require('fs');
+    // 目录可能还没建（start() 里的 mkdirSync 在这之后才执行），先补上再写。
+    fsMod.mkdirSync(require('path').dirname(logFile), { recursive: true });
+    fsMod.appendFileSync(
+      logFile,
+      new Date().toISOString() + ' [boot] main.js 已加载 argv=' + JSON.stringify(process.argv) + '\n'
+    );
+  } catch (e) { /* 诊断失败绝不能影响启动 */ }
+})();
+
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
