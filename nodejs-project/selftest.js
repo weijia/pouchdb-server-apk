@@ -94,14 +94,10 @@ async function main() {
   const flush = await req(ctl, 'POST', '/flush');
   check('控制端口 /flush 落盘', flush.status === 200 && flush.json.ok === true);
 
-  // ---- 快照持久化：强制落盘后重启 ----
-  await first.store.syncRegistry(first.PouchDB);
-  await first.store.flushAll(true);
-  const snapshotFiles = fs.readdirSync(dataDir).filter((f) => f.endsWith('.snapshot.json'));
-  check('生成快照文件', snapshotFiles.some((f) => f.indexOf('testdb') === 0), snapshotFiles.join(','));
+  // ---- leveldb 持久化：重启/退出后数据仍在（旧版 JSON 快照断言已移除）----
 
   // 先彻底停掉本进程内的服务，再启动子进程（否则会共用同一个 server.json）
-  clearInterval(first.state.timer);
+  if (first.state.heartbeatTimer) clearInterval(first.state.heartbeatTimer);
   await new Promise((resolve) => first.controlServer.close(resolve));
   await new Promise((resolve) => first.server.close(resolve));
   try { fs.unlinkSync(path.join(dataDir, 'server.json')); } catch (e) { /* 可能不存在 */ }
@@ -148,7 +144,7 @@ async function main() {
     afterRestore.status === 200 && afterRestore.json.total_rows === 2,
     JSON.stringify(afterRestore.json && afterRestore.json.total_rows));
 
-  // 写入一条新数据后退出，验证退出前会落盘
+  // 写入一条新数据后退出，验证优雅退出（/shutdown 会关闭所有库，确保 memtable 落盘）
   // （不用 SIGTERM：Windows 不支持 POSIX 信号，Android 也无法向 Node 线程发信号）
   await req(base2, 'POST', '/testdb', { _id: 'doc4', n: 4 });
   console.log('[dbg] 已写入 doc4，准备 shutdown');
@@ -160,13 +156,43 @@ async function main() {
   }
   check('/shutdown 优雅退出', child.exitCode === 0, 'exitCode=' + child.exitCode);
 
-  const snapPath = path.join(dataDir, 'testdb.snapshot.json');
-  let hasDoc4 = false;
-  try {
-    const snap = JSON.parse(fs.readFileSync(snapPath, 'utf8'));
-    hasDoc4 = (snap.docs || []).some((d) => d._id === 'doc4');
-  } catch (e) { /* 快照缺失即视为失败 */ }
-  check('退出前写入的数据已落盘', hasDoc4, snapPath);
+  // 第三次启动：验证退出前写入的 doc4 经 leveldb 持久化保留
+  const child2 = spawn(process.execPath, [path.join(__dirname, 'main.js')], {
+    cwd: __dirname,
+    env: Object.assign({}, process.env, {
+      POUCH_DATA_DIR: dataDir,
+      POUCH_PORT: '0',
+      POUCH_CONTROL_PORT: '0',
+      POUCH_INSTANCE: 'selftest-3',
+      POUCH_SNAPSHOT_MS: '500',
+    }),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child2.stdout.on('data', (d) => childLog.push(String(d)));
+  child2.stderr.on('data', (d) => childLog.push(String(d)));
+  const deadline2 = Date.now() + 20000;
+  let child2State = null;
+  while (Date.now() < deadline2) {
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      const parsed = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      if (parsed && parsed.running && parsed.port && parsed.instance === 'selftest-3') {
+        child2State = parsed; break;
+      }
+    } catch (e) { /* 还没写完整 */ }
+  }
+  check('第三次启动并写入 server.json', !!child2State, childLog.join(''));
+  if (child2State) {
+    const base3 = 'http://127.0.0.1:' + child2State.port;
+    const doc4 = await req(base3, 'GET', '/testdb/doc4');
+    check('退出前写入的 doc4 经 leveldb 持久化保留',
+      doc4.status === 200 && doc4.json.n === 4,
+      JSON.stringify(doc4.json));
+    await req('http://127.0.0.1:' + child2State.controlPort, 'POST', '/shutdown');
+    for (let i = 0; i < 40 && child2.exitCode === null; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
 
   console.log('');
   if (failures) {
@@ -176,15 +202,11 @@ async function main() {
     console.log('SELFTEST PASSED');
     process.exitCode = 0;
   }
-  // start() 内部注册了定时落盘（含 30s 强制落盘），会保持事件循环存活；
-  // 测试结束必须清理，否则进程不会自然退出。
+  // start() 内部注册了心跳定时器，会保持事件循环存活；测试结束必须清理。
   try {
-    if (first && first.state) {
-      if (first.state.timer) clearInterval(first.state.timer);
-      if (first.state.forceTimer) clearInterval(first.state.forceTimer);
-    }
+    if (first && first.state && first.state.heartbeatTimer) clearInterval(first.state.heartbeatTimer);
   } catch (e) { /* ignore */ }
-  process.exit(process.exitCode);
+  process.exit(process.exitCode === undefined ? 0 : process.exitCode);
 }
 
 main().catch(function (e) {

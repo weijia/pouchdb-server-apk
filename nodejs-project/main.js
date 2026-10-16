@@ -1,7 +1,7 @@
 'use strict';
 
 // PouchDB Server (nodejs-mobile)
-// 存储/语义层：PouchDB（memory adapter + 快照持久化）
+// 存储/语义层：PouchDB（leveldb adapter，leveldown 原生持久化）
 // 协议层：express-pouchdb（CouchDB 兼容 REST API）
 //
 // 两个监听端口：
@@ -35,12 +35,12 @@ const cors = require('cors');
 const ExpressPouchDB = require('express-pouchdb');
 
 const PouchDB = require('pouchdb-core')
-  .plugin(require('pouchdb-adapter-memory'))
+  .plugin(require('pouchdb-adapter-leveldb'))
   .plugin(require('pouchdb-mapreduce'))
   .plugin(require('pouchdb-replication'))
   .plugin(require('pouchdb-find'));
 
-const { SnapshotStore } = require('./storage');
+const { LevelStore } = require('./storage');
 
 const DEFAULT_PORT = 5984;
 const DEFAULT_CONTROL_PORT = 5985;
@@ -181,23 +181,22 @@ function createControlApp(opts, state) {
     });
   });
 
+  // leveldb 已自动持久化，/flush 无需做任何落盘动作，仅保留接口兼容。
   app.post('/flush', async function (req, res) {
     try {
-      await state.store.syncRegistry(PouchDB);
-      const saved = await state.store.flushAll(true);
-      res.json({ ok: true, saved });
+      res.json({ ok: true, note: 'leveldb 自动持久化，无需手动 flush' });
     } catch (e) {
       res.status(500).json({ error: 'server_error', reason: e.message });
     }
   });
 
-  // 落盘后退出进程。
+  // 关闭所有库并退出进程。
   // 注意：nodejs-mobile 里 Node 运行在 App 进程内，process.exit 会结束整个 App，
   // 因此 Android 侧只应调用 /flush，不要调用本端点；它用于 CI / 本机测试。
   app.post('/shutdown', async function (req, res) {
     try {
-      await state.store.syncRegistry(PouchDB);
-      await state.store.flushAll(true);
+      const names = (typeof PouchDB.allDbs === 'function') ? await PouchDB.allDbs() : [];
+      await Promise.all(names.map((n) => PouchDB(n).close().catch(function () {})));
       res.json({ ok: true, shuttingDown: true });
       setTimeout(function () { process.exit(0); }, 50);
     } catch (e) {
@@ -317,9 +316,12 @@ async function start(opts) {
   // 优先级：调用参数 > 命令行参数 > 环境变量 > 默认值
   opts = Object.assign(defaults(), parseArgs(process.argv.slice(2)), opts || {});
   fs.mkdirSync(opts.dataDir, { recursive: true });
+  // leveldb 适配器把每个库写在 cwd 下的 <name>.leveldb；
+  // 切到数据目录，保证落盘位置可控且可写（files/data 是 App 私有可写目录）。
+  process.chdir(opts.dataDir);
   setupLogger(opts.logFile || path.join(opts.dataDir, 'server.log'));
 
-  const store = new SnapshotStore(opts.dataDir);
+  const store = new LevelStore(opts.dataDir);
 
   const state = {
     dataDir: opts.dataDir,
@@ -336,14 +338,14 @@ async function start(opts) {
   state.app = createApp(opts, state);
   state.server = http.createServer(state.app);
 
-  // 等 pouchdb-all-dbs 就绪后恢复快照，否则恢复出来的库 HTTP 层看不到
+  // 等 pouchdb-all-dbs 就绪后再迁移旧快照，否则迁移出来的库 HTTP 层看不到
   const allDbsReady = await waitForAllDbs(5000);
   if (!allDbsReady) {
-    console.error('[server] 警告: PouchDB.allDbs 未就绪，快照可能无法被 HTTP 层发现');
+    console.error('[server] 警告: PouchDB.allDbs 未就绪，迁移的旧库可能无法被 HTTP 层发现');
   }
   const restored = await store.restoreAll(PouchDB);
   if (restored.length) {
-    console.log('[server] 已恢复快照: ' + JSON.stringify(restored));
+    console.log('[server] 已迁移旧快照到 leveldb: ' + JSON.stringify(restored));
   }
 
   state.controlApp = createControlApp(opts, state);
@@ -357,29 +359,7 @@ async function start(opts) {
     startListening(state, function (err) { (err ? reject(err) : resolve()); });
   });
 
-  // 定期发现新建的数据库并落盘（脏库才写，轻量）
-  state.timer = setInterval(async function () {
-    try {
-      await store.syncRegistry(PouchDB);
-      const saved = await store.flushAll(false);
-      if (saved.length) console.log('[storage] 已保存快照: ' + saved.join(', '));
-    } catch (e) {
-      console.error('[storage] 定时保存异常: ' + e.message);
-    }
-  }, opts.snapshotIntervalMs);
-
-  // 周期强制落盘：即便 live changes 订阅意外中断、漏标脏，
-  // 也保证每个库最多 30s（或 6 个快照周期）内被持久化一次。
-  const FORCE_FLUSH_MS = Math.max(opts.snapshotIntervalMs * 6, 30000);
-  state.forceTimer = setInterval(async function () {
-    try {
-      await store.syncRegistry(PouchDB);
-      const saved = await store.flushAll(false, FORCE_FLUSH_MS);
-      if (saved.length) console.log('[storage] 周期强制落盘: ' + saved.join(', '));
-    } catch (e) {
-      console.error('[storage] 周期强制落盘异常: ' + e.message);
-    }
-  }, FORCE_FLUSH_MS);
+  // leveldb 适配器自动持久化到磁盘，无需定时快照/落盘，仅保留心跳定时器。
 
   // 心跳：定期把时间戳写入 heartbeat 文件。Android 侧据此判断 Node 是否还活着
   // （Node 线程静默退出/卡死时该文件会停止更新，Watchdog 便能发现并自愈重启）。
@@ -392,16 +372,15 @@ async function start(opts) {
   state.heartbeatTimer = setInterval(writeHeartbeat, 10000);
 
   const shutdown = async function (signal) {
-    console.log('[server] 收到 ' + signal + '，正在保存快照...');
+    console.log('[server] 收到 ' + signal + '，正在关闭数据库（leveldb 自动落盘）...');
     try {
-      clearInterval(state.timer);
-      clearInterval(state.forceTimer);
       clearInterval(state.heartbeatTimer);
-      await store.syncRegistry(PouchDB);
-      await store.flushAll(true);
-      console.log('[server] 快照保存完成');
+      // 优雅退出：关闭所有已打开的库，确保 leveldb memtable 落盘。
+      const names = (typeof PouchDB.allDbs === 'function') ? await PouchDB.allDbs() : [];
+      await Promise.all(names.map((n) => PouchDB(n).close().catch(function () {})));
+      console.log('[server] 数据库已关闭 (' + names.length + ' 个)');
     } catch (e) {
-      console.error('[server] 退出保存失败: ' + e.message);
+      console.error('[server] 退出关闭异常: ' + e.message);
     }
     writeStateFile(state);
     process.exit(0);

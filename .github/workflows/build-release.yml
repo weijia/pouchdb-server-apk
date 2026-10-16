@@ -26,7 +26,7 @@ jobs:
     - name: Node selftest
       working-directory: ./nodejs-project
       run: |
-        npm ci --no-audit --no-fund
+        npm install --omit=dev --no-audit --no-fund
         npm run selftest
 
     - name: Prepare node project for assets

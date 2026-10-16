@@ -91,6 +91,22 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:paddingTop="16dp"
+                    android:text="数据库（快照文件大小）"
+                    android:textAppearance="?android:attr/textAppearanceSmall" />
+
+                <TextView
+                    android:id="@+id/tvDb"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="（无数据库 / 服务未启动）"
+                    android:textIsSelectable="true"
+                    android:textSize="11sp"
+                    android:typeface="monospace" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingTop="16dp"
                     android:text="Node 输出（node.log 尾部）"
                     android:textAppearance="?android:attr/textAppearanceSmall" />
 

@@ -62,6 +62,7 @@ public class MainActivity extends Activity {
 
     private TextView tvStatus;
     private TextView tvLog;
+    private TextView tvDb;
     private Button btnToggle;
     private Button btnRefresh;
 
@@ -72,6 +73,7 @@ public class MainActivity extends Activity {
     private boolean serverUp;
     private boolean webViewLoaded;
     private boolean receiverRegistered;
+    private org.json.JSONArray lastDatabases;
 
     // 服务器就绪轮询：只用一个单线程调度器，串行执行避免并发。
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -107,6 +109,7 @@ public class MainActivity extends Activity {
 
         tvStatus = findViewById(R.id.tvStatus);
         tvLog = findViewById(R.id.tvLog);
+        tvDb = findViewById(R.id.tvDb);
         btnToggle = findViewById(R.id.btnToggle);
         btnRefresh = findViewById(R.id.btnRefresh);
 
@@ -135,6 +138,7 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 refreshLog();
+                schedulePoll(0);
             }
         });
 
@@ -188,6 +192,7 @@ public class MainActivity extends Activity {
         statusPanel.setVisibility(View.VISIBLE);
         tabBrowser.setBackgroundColor(COLOR_TAB_NORMAL);
         tabStatus.setBackgroundColor(COLOR_TAB_SELECTED);
+        renderDatabases();
         refreshLog();
     }
 
@@ -227,6 +232,48 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 把数据库名 + 快照文件大小渲染到状态页。 */
+    private void renderDatabases() {
+        if (tvDb == null) {
+            return;
+        }
+        if (lastDatabases == null || lastDatabases.length() == 0) {
+            tvDb.setText("（无数据库 / 服务未启动）");
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < lastDatabases.length(); i++) {
+            org.json.JSONObject d = lastDatabases.optJSONObject(i);
+            if (d == null) {
+                continue;
+            }
+            String name = d.optString("name", "?");
+            long size = d.optLong("size", -1);
+            boolean dirty = d.optBoolean("dirty", false);
+            sb.append(name).append("    ");
+            sb.append(size >= 0 ? formatSize(size) : "大小未知");
+            if (dirty) {
+                sb.append("  (内存有改动未落盘)");
+            }
+            sb.append("\n");
+        }
+        tvDb.setText(sb.toString());
+    }
+
+    private static String formatSize(long bytes) {
+        if (bytes < 1024) {
+            return bytes + " B";
+        }
+        double v = bytes;
+        String[] units = {"KB", "MB", "GB"};
+        int i = 0;
+        while (v >= 1024 && i < units.length - 1) {
+            v /= 1024;
+            i++;
+        }
+        return String.format("%.1f %s", v, units[i]);
+    }
+
     // ============ 服务器就绪轮询 ============
 
     private void startPolling() {
@@ -251,6 +298,7 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         setServerUp(up);
+                        renderDatabases();
                     }
                 });
                 // 就绪后降低探测频率；未就绪时更频繁，缩短等待。
@@ -264,8 +312,10 @@ public class MainActivity extends Activity {
         try {
             String s = Http.get("http://127.0.0.1:" + prefs.getControlPort() + "/status");
             JSONObject o = new JSONObject(s);
+            lastDatabases = o.optJSONArray("databases");
             return o.optBoolean("running", false);
         } catch (Exception e) {
+            lastDatabases = null;
             return false;
         }
     }
