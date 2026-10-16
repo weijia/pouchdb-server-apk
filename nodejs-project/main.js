@@ -9,22 +9,53 @@
 //   2) 控制端口（默认 5985，仅 127.0.0.1）— 供 Android 侧启停数据端口，
 //      因为数据端口关闭后就再也无法用 HTTP 自我唤醒，必须有一个常驻通道。
 
-// 最早落盘的启动诊断：只用内置模块，不依赖任何第三方库。这样即使后面某个 require
-// 失败、或按 nodejs-mobile 单例语义 node::Start 根本没把脚本跑起来，也能在 node.log
-// 里区分「脚本压根没执行」与「脚本执行了但启动报错」——否则只能对着空日志猜。
-(function earlyBootMarker() {
+// ==================== 启动诊断（必须最先执行）====================
+// 只用内置模块，不依赖任何第三方库。Node 的 stdout/stderr 在安卓上不可见（会进
+// logcat 而不在 node.log），所以启动链路每一步都显式写文件，读 node.log 即可定位：
+//   - 连 [boot] 第一行都没有 → node::Start 根本没把脚本跑起来；
+//   - 只有前几行 [boot]      → 卡在后面某处，最后一条 [boot] 就是卡住的位置；
+//   - 出现 fatal/异常堆栈     → 这就是根因。
+function bootLogFile(argv) {
+  const logArg = (argv || []).find(function (a) { return a.indexOf('--log-file=') === 0; });
+  return logArg ? logArg.slice('--log-file='.length) : '';
+}
+
+function bootLog(msg) {
   try {
-    const logArg = process.argv.slice(2).find((a) => a.indexOf('--log-file=') === 0);
-    if (!logArg) return;
-    const logFile = logArg.slice('--log-file='.length);
+    const logFile = bootLogFile(process.argv.slice(2));
+    if (!logFile) return;
     const fsMod = require('fs');
     // 目录可能还没建（start() 里的 mkdirSync 在这之后才执行），先补上再写。
     fsMod.mkdirSync(require('path').dirname(logFile), { recursive: true });
-    fsMod.appendFileSync(
-      logFile,
-      new Date().toISOString() + ' [boot] main.js 已加载 argv=' + JSON.stringify(process.argv) + '\n'
-    );
+    fsMod.appendFileSync(logFile, new Date().toISOString() + ' [boot] ' + msg + '\n');
   } catch (e) { /* 诊断失败绝不能影响启动 */ }
+}
+
+bootLog('main.js 已加载 argv=' + JSON.stringify(process.argv));
+bootLog('运行时 node=' + process.version + ' platform=' + process.platform
+  + ' arch=' + process.arch + ' napi=' + (process.versions.napi || '-')
+  + ' cwd=' + process.cwd() + ' NODE_PATH=' + (process.env.NODE_PATH || '-'));
+
+// 原生模块探针：leveldown 是本服务唯一的原生依赖，也最容易在设备上加载失败
+// （架构/ABI/预编译产物不匹配）。这里只记录诊断信息、不改变失败语义——真正致命与否
+// 由下面加载 leveldb 适配器的 try/catch 决定。
+(function probeNativeLeveldown() {
+  try {
+    const fsMod = require('fs');
+    const pathMod = require('path');
+    const modDir = pathMod.dirname(require.resolve('leveldown/package.json'));
+    const prebuildDir = pathMod.join(modDir, 'prebuilds', process.platform + '-' + process.arch);
+    bootLog('leveldown 目录=' + modDir);
+    try {
+      bootLog('leveldown 预编译产物[' + prebuildDir + ']=' + JSON.stringify(fsMod.readdirSync(prebuildDir)));
+    } catch (e) {
+      bootLog('leveldown 预编译目录不可读(' + prebuildDir + '): ' + e.message);
+    }
+    require('leveldown');
+    bootLog('leveldown 原生绑定加载成功');
+  } catch (e) {
+    bootLog('leveldown 原生绑定加载失败: ' + (e && e.stack ? e.stack : e));
+  }
 })();
 
 const fs = require('fs');
@@ -34,13 +65,28 @@ const express = require('express');
 const cors = require('cors');
 const ExpressPouchDB = require('express-pouchdb');
 
+bootLog('已加载 express / cors / express-pouchdb');
+
 const PouchDB = require('pouchdb-core')
-  .plugin(require('pouchdb-adapter-leveldb'))
   .plugin(require('pouchdb-mapreduce'))
   .plugin(require('pouchdb-replication'))
   .plugin(require('pouchdb-find'));
 
+bootLog('已加载 pouchdb-core / mapreduce / replication / find');
+
+// leveldb 适配器单独 try/catch：它要求 leveldown 原生绑定可用，是设备上最容易失败的一步。
+// 失败必须把堆栈写进 node.log —— 否则顶层异常只会打到安卓不可见的 stderr，现象就是
+// 「线程起来了、页面打不开、日志里却什么都没有」。
+try {
+  PouchDB.plugin(require('pouchdb-adapter-leveldb'));
+  bootLog('已加载 pouchdb-adapter-leveldb');
+} catch (e) {
+  bootLog('fatal: pouchdb-adapter-leveldb 加载失败: ' + (e && e.stack ? e.stack : e));
+  throw e;
+}
+
 const { LevelStore } = require('./storage');
+bootLog('已加载 ./storage');
 
 const DEFAULT_PORT = 5984;
 const DEFAULT_CONTROL_PORT = 5985;
@@ -336,6 +382,8 @@ async function start(opts) {
   // 切到数据目录，保证落盘位置可控且可写（files/data 是 App 私有可写目录）。
   process.chdir(opts.dataDir);
   setupLogger(opts.logFile || path.join(opts.dataDir, 'server.log'));
+  bootLog('start(): dataDir=' + opts.dataDir + ' port=' + opts.port
+    + ' controlPort=' + opts.controlPort + ' instance=' + opts.instance);
 
   const store = new LevelStore(opts.dataDir);
 
@@ -374,6 +422,8 @@ async function start(opts) {
   await new Promise(function (resolve, reject) {
     startListening(state, function (err) { (err ? reject(err) : resolve()); });
   });
+  // 明确的「就绪」标记：Android 侧据此判断页面可以打开（此前只有控制端口日志可判断）。
+  bootLog('HTTP 已就绪: 数据端口=' + state.port + ' 控制端口=' + state.controlPort);
 
   // leveldb 适配器自动持久化到磁盘，无需定时快照/落盘，仅保留心跳定时器。
 

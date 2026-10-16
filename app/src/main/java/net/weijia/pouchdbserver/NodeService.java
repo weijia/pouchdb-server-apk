@@ -74,6 +74,8 @@ public class NodeService extends Service {
     private static final long WATCHDOG_INTERVAL_MS = 30_000;
     /** 心跳过期阈值：远大于 Node 10s 一次的心跳间隔 */
     private static final long HEARTBEAT_STALE_MS = 90_000;
+    /** 启动后等待数据端口就绪的上限：Node 线程起来 ≠ HTTP 可用，必须探测确认 */
+    private static final long READY_TIMEOUT_MS = 30_000;
 
     private final Runnable watchdog = new Runnable() {
         @Override
@@ -175,10 +177,21 @@ public class NodeService extends Service {
                 try {
                     File projectDir = prepareNodeProject();
                     startNode(projectDir);
-                    broadcast(true, true, "CouchDB 兼容服务运行中（:5984）");
+                    // node::Start 返回只代表 Node 线程已被拉起，不代表 HTTP 已在监听。
+                    // 必须探测控制端口 /status 的 running 才能确认服务真的可用；否则界面会
+                    // 显示「运行中」而页面打不开——这正是历史上最误导的一处。
+                    starting = false;
+                    boolean ready = waitUntilServing(READY_TIMEOUT_MS);
+                    if (ready) {
+                        bootLog("数据端口已就绪: " + Prefs.DEFAULT_PORT);
+                        broadcast(true, true, "CouchDB 兼容服务运行中（:5984）");
+                    } else if (!stopping) {
+                        bootLog("Node 线程已启动，但 " + READY_TIMEOUT_MS + "ms 内控制端口未返回 running");
+                        dumpNodeLogToBoot("启动后数据端口未就绪");
+                        broadcast(true, false, "Node 线程已启动，但数据端口未就绪（详见日志）");
+                    }
                     // Node 起来后才开 Watchdog，且延后一轮再检查心跳，
                     // 避免 Node 首次写心跳前被误判为死亡。
-                    starting = false;
                     mainHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS);
                 } catch (Throwable e) {
                     Log.e(TAG, "启动失败", e);
@@ -281,6 +294,89 @@ public class NodeService extends Service {
         bootLog("Node 已在专用线程启动");
     }
 
+    // ==================== 就绪探测 / 日志 ====================
+
+    /**
+     * 轮询控制端口 /status，直到 running=true 或超时。
+     * Node 线程起来 ≠ HTTP 可用：只有这个探测才能确认数据端口真的在服务。
+     */
+    private boolean waitUntilServing(long timeoutMs) {
+        long deadline = SystemClock.elapsedRealtime() + timeoutMs;
+        while (true) {
+            if (stopping) {
+                return false;
+            }
+            if (isServing()) {
+                return true;
+            }
+            if (SystemClock.elapsedRealtime() >= deadline) {
+                return false;
+            }
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+    }
+
+    /** 控制端口 /status 的 running 字段：true 才代表数据端口已真正监听。 */
+    private boolean isServing() {
+        try {
+            String body = Http.get("http://127.0.0.1:" + Prefs.DEFAULT_CONTROL_PORT + "/status");
+            return new org.json.JSONObject(body).optBoolean("running", false);
+        } catch (Throwable t) {
+            return false; // 连不上或响应不可解析都算未就绪
+        }
+    }
+
+    /**
+     * 把 node.log 末尾追加到 boot.log。Node 的 stdout/stderr 在安卓上不可见（不进
+     * node.log 的话界面就读不到），只有写进文件界面才看得到；否则「线程起来了但
+     * 服务没起」只能靠猜。
+     */
+    private void dumpNodeLogToBoot(String why) {
+        try {
+            String tail = readTail(new File(getFilesDir(), "node.log"), 2000);
+            if (tail == null || tail.trim().isEmpty()) {
+                tail = "（空：main.js 可能没被执行，或 Node 无法写日志）";
+            }
+            bootLog("---- node.log 末尾（" + why + "）----\n" + tail);
+        } catch (Throwable t) {
+            bootLog("读取 node.log 失败: " + t);
+        }
+    }
+
+    /** 读取文件尾部最多 max 字节，失败或不存在返回 null。 */
+    private static String readTail(File file, int max) {
+        if (file == null || !file.exists()) {
+            return null;
+        }
+        java.io.RandomAccessFile raf = null;
+        try {
+            raf = new java.io.RandomAccessFile(file, "r");
+            long length = raf.length();
+            int size = (int) Math.min(length, (long) max);
+            if (size <= 0) {
+                return "";
+            }
+            raf.seek(length - size);
+            byte[] buf = new byte[size];
+            raf.readFully(buf);
+            return new String(buf, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            if (raf != null) {
+                try {
+                    raf.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
     // ==================== 停止流程 ====================
 
     private void stopServer() {
@@ -324,6 +420,8 @@ public class NodeService extends Service {
 
         bootLog("Node 不可用[" + reason + "] code=" + code
                 + " uptime=" + uptime + "ms streak=" + streak);
+        // 顺带保留 Node 侧日志末尾：界面只读 boot.log 就能看到根因（含 require 失败堆栈）。
+        dumpNodeLogToBoot(reason);
 
         mainHandler.removeCallbacks(watchdog);
         mainHandler.post(new Runnable() {
