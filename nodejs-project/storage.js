@@ -35,12 +35,6 @@ class LevelStore {
 
     for (const file of files) {
       const name = file.replace(/\.snapshot\.json$/, '');
-      const levelDir = path.join(this.dataDir, name + '.leveldb');
-      if (fs.existsSync(levelDir)) {
-        // 已迁移：旧快照可直接删除
-        try { fs.unlinkSync(path.join(this.dataDir, file)); } catch (e) { /* ignore */ }
-        continue;
-      }
       let payload;
       try {
         payload = JSON.parse(fs.readFileSync(path.join(this.dataDir, file), 'utf8'));
@@ -49,7 +43,8 @@ class LevelStore {
         continue;
       }
       const docs = payload && Array.isArray(payload.docs) ? payload.docs : [];
-      // leveldb 适配器以库名直接作为目录名（如 dataDir/mydb），已存在说明迁移过/已有数据
+      // leveldb 适配器把库写在 cwd 下的 <name> 目录（main.js 已 chdir 到 dataDir），
+      // 若该目录已存在说明迁移过/已有数据，直接删掉旧快照文件即可。
       const dbDir = path.join(this.dataDir, name);
       if (fs.existsSync(dbDir)) {
         try { fs.unlinkSync(path.join(this.dataDir, file)); } catch (e) { /* ignore */ }
@@ -89,7 +84,7 @@ class LevelStore {
       if (!fs.existsSync(path.join(full, 'CURRENT'))) continue;
       let size = -1;
       try { size = du(full); } catch (err) { /* ignore */ }
-      dbs.push({ name: e, size, dirty: false, lastSave: 0 });
+      dbs.push({ name: e, size });
     }
     return dbs;
   }

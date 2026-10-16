@@ -232,7 +232,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 把数据库名 + 快照文件大小渲染到状态页。 */
+    /** 把每个数据库名与其 leveldb 目录占盘大小渲染到状态页。 */
     private void renderDatabases() {
         if (tvDb == null) {
             return;
@@ -249,12 +249,8 @@ public class MainActivity extends Activity {
             }
             String name = d.optString("name", "?");
             long size = d.optLong("size", -1);
-            boolean dirty = d.optBoolean("dirty", false);
             sb.append(name).append("    ");
             sb.append(size >= 0 ? formatSize(size) : "大小未知");
-            if (dirty) {
-                sb.append("  (内存有改动未落盘)");
-            }
             sb.append("\n");
         }
         tvDb.setText(sb.toString());
