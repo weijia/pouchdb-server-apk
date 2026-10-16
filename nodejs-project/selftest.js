@@ -96,10 +96,14 @@ async function main() {
 
   // ---- leveldb 持久化：重启/退出后数据仍在（旧版 JSON 快照断言已移除）----
 
-  // 先彻底停掉本进程内的服务，再启动子进程（否则会共用同一个 server.json）
+  // 先彻底停掉本进程内的服务，再启动子进程（否则会共用同一个 server.json）。
+  // 关键：leveldb 对库目录持有 LOCK 文件锁，必须以「旧进程已完全退出」的姿态收尾，
+  // 即关闭所有库句柄把锁释放掉；否则子进程打开同一个库会报
+  // "IO error: lock ... Resource temporarily unavailable"，且该库上的请求会一直挂住。
   if (first.state.heartbeatTimer) clearInterval(first.state.heartbeatTimer);
   await new Promise((resolve) => first.controlServer.close(resolve));
   await new Promise((resolve) => first.server.close(resolve));
+  await first.closeAllDbs();
   try { fs.unlinkSync(path.join(dataDir, 'server.json')); } catch (e) { /* 可能不存在 */ }
 
   const childLog = [];

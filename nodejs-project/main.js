@@ -109,6 +109,23 @@ function basicAuth(user, pass) {
   };
 }
 
+// 关闭所有已打开的库，释放 leveldb 对库目录持有的 LOCK 文件 —— 优雅退出/重启收尾用。
+// 注意 pouch__all_dbs__ 是 express-pouchdb 维护的内部库，不会出现在 allDbs() 里，
+// 必须显式关闭；漏掉它锁不会释放，之后另一个进程打开同名库会直接报
+// "OpenError: IO error: lock xxx/LOCK: Resource temporarily unavailable"，
+// 且该库上的请求会一直挂住（levelup 的 deferred 队列不回调），表现为接口无响应。
+async function closeAllDbs() {
+  let names = [];
+  try {
+    names = (typeof PouchDB.allDbs === 'function') ? await PouchDB.allDbs() : [];
+  } catch (e) { /* 插件未就绪时按空列表处理 */ }
+  const all = names.concat(['pouch__all_dbs__']);
+  await Promise.all(all.map(function (n) {
+    return PouchDB(n).close().catch(function () { /* 已关闭或不存在的库忽略 */ });
+  }));
+  return all;
+}
+
 function createApp(opts, state) {
   const app = express();
 
@@ -195,8 +212,7 @@ function createControlApp(opts, state) {
   // 因此 Android 侧只应调用 /flush，不要调用本端点；它用于 CI / 本机测试。
   app.post('/shutdown', async function (req, res) {
     try {
-      const names = (typeof PouchDB.allDbs === 'function') ? await PouchDB.allDbs() : [];
-      await Promise.all(names.map((n) => PouchDB(n).close().catch(function () {})));
+      await closeAllDbs();
       res.json({ ok: true, shuttingDown: true });
       setTimeout(function () { process.exit(0); }, 50);
     } catch (e) {
@@ -375,10 +391,9 @@ async function start(opts) {
     console.log('[server] 收到 ' + signal + '，正在关闭数据库（leveldb 自动落盘）...');
     try {
       clearInterval(state.heartbeatTimer);
-      // 优雅退出：关闭所有已打开的库，确保 leveldb memtable 落盘。
-      const names = (typeof PouchDB.allDbs === 'function') ? await PouchDB.allDbs() : [];
-      await Promise.all(names.map((n) => PouchDB(n).close().catch(function () {})));
-      console.log('[server] 数据库已关闭 (' + names.length + ' 个)');
+      // 优雅退出：关闭所有已打开的库，确保 leveldb memtable 落盘并释放文件锁。
+      const closed = await closeAllDbs();
+      console.log('[server] 数据库已关闭 (' + closed.length + ' 个)');
     } catch (e) {
       console.error('[server] 退出关闭异常: ' + e.message);
     }
@@ -391,7 +406,10 @@ async function start(opts) {
   console.log('[server] 已启动 instance=' + opts.instance +
     ' port=' + state.port + ' controlPort=' + state.controlPort +
     ' dataDir=' + opts.dataDir);
-  return { app: state.app, server: state.server, controlServer: state.controlServer, store, state, PouchDB };
+  return {
+    app: state.app, server: state.server, controlServer: state.controlServer,
+    store, state, PouchDB, closeAllDbs,
+  };
 }
 
 module.exports = { start, createApp, defaults, COUCHDB_VERSION };

@@ -13,33 +13,16 @@ cd "${SRC_DIR}"
 # 改为 npm install 让其自动更新 lock。
 npm install --omit=dev --no-audit --no-fund
 
-# ===== 交叉编译 leveldown（nodejs-mobile / Android）=====
-# 关键陷阱：宿主是 Node 20，但运行时 libnode 是 nodejs-mobile v18.20.4，ABI 不同。
-# 必须用 prebuild-for-nodejs-mobile 针对 v18.20.4 的 headers 交叉编译，
-# 否则编出的 .node 是 Node 20 标准 ABI，放进 nodejs-mobile 会加载失败。
-export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/opt/android-sdk}}"
-export ANDROID_SDK_ROOT="${ANDROID_HOME}"
-export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/25.2.9519653"
-
-if [ -d node_modules/leveldown ]; then
-  echo "[prepare-node-project] 交叉编译 leveldown (nodejs-mobile v18.20.4) ..."
-  for arch in android-arm64 android-arm; do
-    echo "[prepare-node-project]   -> ${arch}"
-    ( cd node_modules/leveldown && npx --yes "prebuild-for-nodejs-mobile@18.20.4" "${arch}" --sdk34 --verbose )
-  done
-  # 兜底：把编出的 .node 也放到 build/Release/leveldown.node，
-  # 这样即便 prebuild 在运行时的解析失败，require('leveldown') 也能回退到这里加载。
-  BUILT="$(find node_modules/leveldown/prebuilds -name '*.node' 2>/dev/null | head -n1)"
-  if [ -n "${BUILT}" ]; then
-    mkdir -p node_modules/leveldown/build/Release
-    cp "${BUILT}" node_modules/leveldown/build/Release/leveldown.node
-    echo "[prepare-node-project] 已复制 ${BUILT} -> build/Release/leveldown.node"
-  else
-    echo "[prepare-node-project] 警告: 未找到编出的 .node，leveldown 可能无法加载"
-  fi
-else
-  echo "[prepare-node-project] 未找到 node_modules/leveldown，跳过 leveldown 编译"
-fi
+# ===== 关于 leveldown（pouchdb-adapter-leveldb 依赖的原生模块）=====
+# 不需要交叉编译，也不需要 NDK：leveldown 通过 node-gyp-build 加载，npm 包内
+# 自带 Android 的 N-API 预编译产物（prebuilds/android-arm64/node.napi.armv8.node、
+# prebuilds/android-arm/node.napi.armv7.node，由 leveldown 的 prebuild-android-arm
+# 脚本用 prebuildify-cross --napi 产出）。N-API 是 ABI 稳定的，可直接在
+# nodejs-mobile 的 libnode 上加载，宿主与设备端的 Node 版本差异不影响它。
+#
+# 切勿再把 .node 复制到 node_modules/leveldown/build/Release/：node-gyp-build 会
+# 优先加载 build/Release，一旦那里放了宿主二进制（如 linux-x64/armv7），设备上必然
+# 加载失败（ELF 架构/ABI 不符）。让它自然回落到 prebuilds/ 目录才是正确路径。
 
 echo "[prepare-node-project] 复制到 assets..."
 rm -rf "${ASSETS_DIR}"
