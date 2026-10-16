@@ -85,7 +85,6 @@ public class MainActivity extends Activity {
     private org.json.JSONArray lastDatabases;
 
     // ===== 局域网发现 / 配对 / 同步 =====
-    private Prefs prefs;
     private MdnsDiscovery mdns;
     private final Map<String, MdnsDiscovery.Peer> peerMap = new HashMap<>();
     private EditText etAdminUser;

@@ -130,8 +130,13 @@ public final class MdnsDiscovery {
             }
 
             @Override
-            public void onDiscoveryFailed(String serviceType, int errorCode) {
-                Log.w(TAG, "发现失败 code=" + errorCode);
+            public void onStartDiscoveryFailed(String serviceType, int errorCode) {
+                Log.w(TAG, "启动发现失败 code=" + errorCode);
+            }
+
+            @Override
+            public void onStopDiscoveryFailed(String serviceType, int errorCode) {
+                Log.w(TAG, "停止发现失败 code=" + errorCode);
             }
 
             @Override
