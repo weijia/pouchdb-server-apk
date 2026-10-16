@@ -8,8 +8,9 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 
-/** 极简 HTTP 客户端：只用于访问本机回环地址的控制端口/状态端点。 */
+/** 极简 HTTP 客户端：访问本机回环控制端口，以及局域网内其他实例的数据端口。 */
 public final class Http {
 
     private static final int TIMEOUT_MS = 4000;
@@ -17,19 +18,47 @@ public final class Http {
     private Http() {
     }
 
+    /** GET（无鉴权）。 */
     public static String get(String url) throws IOException {
+        return get(url, null, null);
+    }
+
+    /** GET（带可选 Basic Auth）。 */
+    public static String get(String url, String user, String pass) throws IOException {
         HttpURLConnection conn = open(url, "GET");
+        if (user != null && pass != null) {
+            conn.setRequestProperty("Authorization", basic(user, pass));
+        }
         return read(conn);
     }
 
+    /** POST（无 body、无鉴权），用于本机控制端口如 /start。 */
     public static String post(String url) throws IOException {
+        return postJson(url, null, null, null);
+    }
+
+    /** POST JSON（带可选 Basic Auth）。 */
+    public static String postJson(String url, String jsonBody, String user, String pass) throws IOException {
         HttpURLConnection conn = open(url, "POST");
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Length", "0");
-        OutputStream os = conn.getOutputStream();
-        os.flush();
-        os.close();
+        if (user != null && pass != null) {
+            conn.setRequestProperty("Authorization", basic(user, pass));
+        }
+        if (jsonBody != null && !jsonBody.isEmpty()) {
+            byte[] bytes = jsonBody.getBytes(StandardCharsets.UTF_8);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Content-Length", String.valueOf(bytes.length));
+            conn.setDoOutput(true);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(bytes);
+                os.flush();
+            }
+        }
         return read(conn);
+    }
+
+    private static String basic(String user, String pass) {
+        String raw = user + ":" + pass;
+        return "Basic " + Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
     private static HttpURLConnection open(String url, String method) throws IOException {

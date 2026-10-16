@@ -89,6 +89,48 @@ db.sync('http://192.168.1.20:5984/mydb', { live: true, retry: true })
 启用 Basic Auth（可选）：在 Node 启动参数里加 `--auth-user=xxx --auth-pass=yyy`，
 或在 `Prefs` 中配置后由服务传入（当前默认关闭，仅限可信局域网使用）。
 
+## 局域网发现、配对与同步
+
+手机上的实例之间可以互相发现、经审批建立信任、并把对方的数据库同步到本机。
+
+- **发现**：App 通过 Android NSD 监听 `_couchdb._tcp`，解析出同网其他实例的地址与
+  `device_id`/`instance`，并自动排除本机自身（`MdnsDiscovery.java`）。本机同时也通过
+  `MdnsAdvertiser` 宣告自身（TXT 含 `device_id`），使他人可发现。
+- **设备身份**：每台机器有稳定 `deviceId`（UUID，首次生成后持久化）与可改的展示名 `instance`
+  （见 `Prefs.java`）。
+- **管理账号**：App「状态/日志」页可设置本机管理账号（写入 `users.json`，密码以 scrypt
+  加盐哈希）。`users.json` 非空即要求数据端口 Basic Auth 登录；WebView（Fauxton）自动用该账号登录。
+- **配对（互为生成账号）**：在「局域网设备」里点某对端的「配对」→ 对端数据端口
+  `POST /_pair/request` 创建待审 → 对端用户在「待审批请求」里点「允许」（控制端口
+  `POST /pair/approve`）→ 本机轮询 `GET /_pair/status` 拿到对端自动生成的专属账号。
+  双方各自发起一次并完成审批后，彼此持有对方账号，可双向同步。全程无需人工输入对方密码。
+  - 配对开关默认**关闭**（不可信网络下不接受 `/_pair/request`）；开启后才接受请求，并有
+    pending 数量上限与同设备速率限制防刷。
+- **同步**：已配对对端展开其数据库列表（带凭据 `GET /_all_dbs`），勾选后由本机控制端口
+  `POST /replicate` 用已加载的 `pouchdb-replication` 执行同步；状态见 `GET /replications`，
+  停止见 `POST /replicate/stop`。同步在 Node 运行时内完成，App 只发指令与展示。
+
+### 控制端口新增端点（均为回环地址，配对审批/管理账号仅本机可调）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/admin/set` | 设置/替换管理账号 `{user, pass}` |
+| GET | `/admin/status` | 是否已配置管理账号 |
+| POST | `/pairing/set` | 开/关配对 `{enabled}` |
+| GET | `/pair/requests` | 待审批配对列表 |
+| POST | `/pair/approve` / `/pair/deny` | 审批 / 拒绝 `{token}` |
+| POST | `/replicate` | 触发同步 `{db, remoteHost, remotePort, remoteUser, remotePass, live}` |
+| GET | `/replications` | 同步任务状态 |
+| POST | `/replicate/stop` | 停止同步 `{key}` |
+
+### 数据端口新增/相关端点
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| POST | `/_pair/request` | 免鉴权（受配对开关与限流约束） | 创建配对待审，返回 `{token}` |
+| GET | `/_pair/status?token=` | 免鉴权 | 返回 `pending` / `approved(user,pass)` / `denied` |
+| GET | `/_all_dbs` | 需登录 | 列出本机数据库（对端拉取表清单用） |
+
 ## 持久化机制与局限
 
 PouchDB 的 `memory` adapter 不落盘，本项目用**快照**持久化（见 `nodejs-project/storage.js`）：

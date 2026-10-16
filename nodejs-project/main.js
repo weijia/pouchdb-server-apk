@@ -88,6 +88,9 @@ try {
 const { LevelStore } = require('./storage');
 bootLog('已加载 ./storage');
 
+const { UserStore } = require('./users');
+bootLog('已加载 ./users');
+
 const DEFAULT_PORT = 5984;
 const DEFAULT_CONTROL_PORT = 5985;
 // 对外伪装成 CouchDB 3.3.3，部分客户端会检查该版本号
@@ -137,14 +140,18 @@ function setupLogger(logFile) {
   }
 }
 
-function basicAuth(user, pass) {
+// 多用户 Basic Auth：数据端口（5984）统一鉴权入口。users.json 非空即要求登录，
+// 任何 active 的 admin / peer 账号均可放行（库级 ACL 留待后续）。
+function multiUserBasicAuth(userStore) {
   return function (req, res, next) {
     const header = req.headers.authorization || '';
     let valid = false;
     if (header.startsWith('Basic ')) {
       const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
       const idx = decoded.indexOf(':');
-      valid = idx >= 0 && decoded.slice(0, idx) === user && decoded.slice(idx + 1) === pass;
+      if (idx >= 0) {
+        valid = userStore.verify(decoded.slice(0, idx), decoded.slice(idx + 1));
+      }
     }
     if (!valid) {
       res.set('WWW-Authenticate', 'Basic realm="pouchdb-server"');
@@ -153,6 +160,17 @@ function basicAuth(user, pass) {
     }
     next();
   };
+}
+
+// 轻量 JSON body 解析：仅挂到我们自己的路由上，避免与 express-pouchdb 自身的 body 处理冲突。
+function jsonBody(req, res, next) {
+  if (req.method !== 'POST') return next();
+  let data = '';
+  req.on('data', function (c) { data += c; });
+  req.on('end', function () {
+    try { req.body = data ? JSON.parse(data) : {}; } catch (e) { req.body = {}; }
+    next();
+  });
 }
 
 // 关闭所有已打开的库，释放 leveldb 对库目录持有的 LOCK 文件 —— 优雅退出/重启收尾用。
@@ -183,6 +201,7 @@ function createApp(opts, state) {
       status: state.running ? 'running' : 'stopped',
       couchdb: COUCHDB_VERSION,
       instance: opts.instance,
+      deviceId: opts.deviceId || '',
       port: state.port,
       controlPort: state.controlPort,
       uptimeMs: Date.now() - state.startedAt,
@@ -192,8 +211,37 @@ function createApp(opts, state) {
     });
   });
 
-  if (opts.authUser) {
-    app.use(basicAuth(opts.authUser, opts.authPass));
+  // 公开配对端点：免数据端口鉴权，但受「允许配对」开关与限流约束。
+  // 必须注册在 multiUserBasicAuth 之前，否则匿名请求会被 401 挡住。
+  app.post('/_pair/request', jsonBody, function (req, res) {
+    if (!state.pairingEnabled) {
+      res.status(403).json({ error: 'forbidden', reason: 'pairing disabled' });
+      return;
+    }
+    const deviceId = (req.body && req.body.device_id) || '';
+    const name = (req.body && req.body.name) || '';
+    const r = state.userStore.addPending(deviceId, name);
+    if (r.error) {
+      res.status(429).json({ error: r.error, reason: 'too many pending requests' });
+      return;
+    }
+    res.json({ token: r.token });
+  });
+
+  app.get('/_pair/status', function (req, res) {
+    const token = req.query.token || '';
+    const s = state.userStore.status(token);
+    if (s.state === 'notfound') {
+      res.status(404).json({ error: 'not_found', reason: 'unknown token' });
+      return;
+    }
+    res.json(s);
+  });
+
+  // 多用户鉴权：users.json 非空即要求登录（admin / peer 均可）。
+  // 取代原先的单账号 basicAuth；旧 --auth-user 已 seed 进 users.json（见 start()）。
+  if (state.userStore && state.userStore.hasAnyUser()) {
+    app.use(multiUserBasicAuth(state.userStore));
   }
 
   app.use('/', ExpressPouchDB(PouchDB, {
@@ -266,6 +314,118 @@ function createControlApp(opts, state) {
     }
   });
 
+  // ==================== 本机管理账号 ====================
+  // 设置/替换 admin 账号（密码以加盐哈希落盘，不存明文）。
+  app.post('/admin/set', jsonBody, function (req, res) {
+    const user = (req.body && req.body.user) || '';
+    const pass = (req.body && req.body.pass) || '';
+    if (!user || !pass) {
+      res.status(400).json({ error: 'bad_request', reason: 'user and pass required' });
+      return;
+    }
+    state.userStore.setAdmin(user, pass);
+    res.json({ ok: true });
+  });
+
+  app.get('/admin/status', function (req, res) {
+    res.json(state.userStore.getAdminStatus());
+  });
+
+  // ==================== 配对开关 ====================
+  // 仅本机可切换：开启后数据端口才接受 /_pair/request（默认关闭，防不可信网络被刷）。
+  app.post('/pairing/set', jsonBody, function (req, res) {
+    state.pairingEnabled = !!(req.body && req.body.enabled);
+    writeStateFile(state);
+    res.json({ ok: true, pairingEnabled: state.pairingEnabled });
+  });
+
+  app.get('/pairing/status', function (req, res) {
+    res.json({ pairingEnabled: !!state.pairingEnabled });
+  });
+
+  // ==================== 配对待审与审批 ====================
+  app.get('/pair/requests', function (req, res) {
+    res.json({ requests: state.userStore.getPendingList() });
+  });
+
+  app.post('/pair/approve', jsonBody, function (req, res) {
+    const token = (req.body && req.body.token) || '';
+    const r = state.userStore.approve(token);
+    if (!r) {
+      res.status(404).json({ error: 'not_found', reason: 'unknown token' });
+      return;
+    }
+    res.json({ ok: true, user: r.user, pass: r.pass });
+  });
+
+  app.post('/pair/deny', jsonBody, function (req, res) {
+    const token = (req.body && req.body.token) || '';
+    const ok = state.userStore.deny(token);
+    res.json({ ok: ok });
+  });
+
+  // ==================== 同步（replicate）====================
+  // 触发本地库与远端（对端）库的同步；复用已加载的 pouchdb-replication。
+  app.post('/replicate', jsonBody, function (req, res) {
+    const b = req.body || {};
+    const db = b.db;
+    const remoteHost = b.remoteHost;
+    const remotePort = b.remotePort;
+    if (!db || !remoteHost || !remotePort) {
+      res.status(400).json({ error: 'bad_request', reason: 'db, remoteHost, remotePort required' });
+      return;
+    }
+    const auth = (b.remoteUser && b.remotePass)
+      ? encodeURIComponent(b.remoteUser) + ':' + encodeURIComponent(b.remotePass) + '@'
+      : '';
+    const remote = 'http://' + auth + remoteHost + ':' + remotePort + '/' + encodeURIComponent(db);
+    const key = db + '@' + remoteHost + ':' + remotePort;
+    if (state.replications[key]) {
+      res.json({ ok: true, key: key, note: 'already running' });
+      return;
+    }
+    const local = new PouchDB(db);
+    const rep = local.sync(remote, { live: !!b.live, retry: !!b.live });
+    const entry = {
+      rep: rep, db: db, remote: remote, live: !!b.live,
+      status: 'starting', lastSeq: null, error: null,
+    };
+    rep.on('change', function (info) {
+      entry.status = 'active';
+      if (info && info.last_seq) entry.lastSeq = info.last_seq;
+    });
+    rep.on('active', function () { entry.status = 'active'; });
+    rep.on('paused', function (err) { entry.status = err ? 'error' : 'paused'; entry.error = err ? String(err) : null; });
+    rep.on('denied', function (err) { entry.status = 'denied'; entry.error = err ? String(err) : null; });
+    rep.on('error', function (err) { entry.status = 'error'; entry.error = err ? String(err) : null; });
+    state.replications[key] = entry;
+    console.log('[replicate] 启动 ' + key + ' live=' + !!b.live);
+    res.json({ ok: true, key: key });
+  });
+
+  app.get('/replications', function (req, res) {
+    const list = Object.keys(state.replications).map(function (key) {
+      const e = state.replications[key];
+      return {
+        key: key, db: e.db, remote: e.remote, live: e.live,
+        status: e.status, lastSeq: e.lastSeq, error: e.error,
+      };
+    });
+    res.json({ replications: list });
+  });
+
+  app.post('/replicate/stop', jsonBody, function (req, res) {
+    const key = (req.body && req.body.key) || '';
+    const e = state.replications[key];
+    if (!e) {
+      res.status(404).json({ error: 'not_found', reason: 'unknown replication key' });
+      return;
+    }
+    try { e.rep.cancel(); } catch (e2) { /* ignore */ }
+    delete state.replications[key];
+    res.json({ ok: true, key: key });
+  });
+
   return app;
 }
 
@@ -312,6 +472,8 @@ function writeStateFile(state) {
       port: state.port,
       controlPort: state.controlPort,
       instance: state.instance,
+      deviceId: state.deviceId || '',
+      pairingEnabled: !!state.pairingEnabled,
       startedAt: state.startedAt,
       dataDir: state.dataDir,
       updatedAt: Date.now(),
@@ -330,6 +492,7 @@ function parseArgs(argv) {
     'auth-pass': 'authPass',
     'cors-origin': 'corsOrigin',
     'snapshot-ms': 'snapshotIntervalMs',
+    'device-id': 'deviceId',
     // Android 侧额外传入：Node 的 stdout 在安卓上不可见，日志写到这个文件后
     // 界面才能读到；同时它也是 App 判断「服务是否还活着」的依据之一。
     'log-file': 'logFile',
@@ -387,15 +550,23 @@ async function start(opts) {
 
   const store = new LevelStore(opts.dataDir);
 
+  // 账户与配对存储：旧 --auth-user/--auth-pass 在 users.json 为空时 seed 为 admin（启动兼容）
+  const userStore = new UserStore(opts.dataDir);
+  userStore.seedAdminIfEmpty(opts.authUser, opts.authPass);
+
   const state = {
     dataDir: opts.dataDir,
     instance: opts.instance,
+    deviceId: opts.deviceId || '',
     requestedPort: opts.port,
     port: opts.port,
     controlPort: opts.controlPort,
     running: false,
     startedAt: Date.now(),
     store,
+    userStore,
+    replications: {},
+    pairingEnabled: false,
     stateFile: path.join(opts.dataDir, 'server.json'),
   };
 

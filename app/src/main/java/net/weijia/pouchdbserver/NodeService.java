@@ -18,6 +18,8 @@ import android.util.Log;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.ServiceCompat;
 
+import net.weijia.pouchdbserver.MdnsAdvertiser;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -53,6 +55,8 @@ public class NodeService extends Service {
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private MdnsAdvertiser advertiser;
+    private final Prefs prefs = new Prefs(this);
 
     private boolean nodeStarted;
     private volatile boolean starting;
@@ -273,7 +277,8 @@ public class NodeService extends Service {
                 "--data-dir=" + dataDir.getAbsolutePath(),
                 "--port=" + Prefs.DEFAULT_PORT,
                 "--control-port=" + Prefs.DEFAULT_CONTROL_PORT,
-                "--instance=pouchdb-server",
+                "--instance=" + prefs.getInstance(),
+                "--device-id=" + prefs.getDeviceId(),
                 "--log-file=" + logFile.getAbsolutePath(),
         };
 
@@ -292,6 +297,17 @@ public class NodeService extends Service {
 
         nodeStarted = true;
         bootLog("Node 已在专用线程启动");
+
+        // 启动 mDNS 宣告，使本机在局域网内可被其他 pouchdb-server 发现（互为配对需要双向）。
+        // 端口固定为数据端口，device_id 取自 Prefs（稳定身份）。
+        try {
+            if (advertiser == null) {
+                advertiser = new MdnsAdvertiser(this, null);
+            }
+            advertiser.start(prefs.getInstance(), Prefs.DEFAULT_PORT, prefs.getDeviceId());
+        } catch (Throwable t) {
+            bootLog("MdnsAdvertiser 启动失败（不影响数据服务）: " + t.getMessage());
+        }
     }
 
     // ==================== 就绪探测 / 日志 ====================
@@ -383,6 +399,9 @@ public class NodeService extends Service {
         stopping = true;
         starting = false;
         nodeStarted = false;
+        if (advertiser != null) {
+            try { advertiser.stop(); } catch (Throwable ignored) { }
+        }
         mainHandler.removeCallbacks(watchdog);
         NodeBridge.clearNodeExitListener();
         mainHandler.post(new Runnable() {
@@ -413,6 +432,9 @@ public class NodeService extends Service {
         stopping = true;
         starting = false;
         nodeStarted = false;
+        if (advertiser != null) {
+            try { advertiser.stop(); } catch (Throwable ignored) { }
+        }
 
         long uptime = startAtMs > 0 ? (SystemClock.elapsedRealtime() - startAtMs) : 0;
         int streak = uptime < QUICK_EXIT_MS ? (readStreak() + 1) : 0;

@@ -43,6 +43,7 @@ public final class MdnsAdvertiser {
 
     private String instanceName;
     private int port;
+    private String deviceId = "";
     private boolean registered;
     private boolean started;
     private int retryCount;
@@ -53,13 +54,14 @@ public final class MdnsAdvertiser {
         this.nsdManager = (NsdManager) appContext.getSystemService(Context.NSD_SERVICE);
     }
 
-    public synchronized void start(String name, int httpPort) {
+    public synchronized void start(String name, int httpPort, String deviceId) {
         if (started) {
             stop();
         }
         started = true;
         instanceName = sanitize(name);
         port = httpPort;
+        this.deviceId = deviceId != null ? deviceId : "";
         retryCount = 0;
         acquireMulticastLock();
         register();
@@ -100,6 +102,9 @@ public final class MdnsAdvertiser {
         info.setAttribute("version", "1.0");
         info.setAttribute("http_port", String.valueOf(port));
         info.setAttribute("instance", instanceName);
+        if (!deviceId.isEmpty()) {
+            info.setAttribute("device_id", deviceId);
+        }
 
         registrationListener = new NsdManager.RegistrationListener() {
             @Override
