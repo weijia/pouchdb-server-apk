@@ -70,9 +70,12 @@ bootLog('已加载 express / cors / express-pouchdb');
 const PouchDB = require('pouchdb-core')
   .plugin(require('pouchdb-mapreduce'))
   .plugin(require('pouchdb-replication'))
+  // http 适配器：/replicate 里 sync(remoteUrl) 需要 new PouchDB('http://...')。
+  // 缺它会在 sync 时抛 "Invalid Adapter: http"，同步永远建立不起来。
+  .plugin(require('pouchdb-adapter-http'))
   .plugin(require('pouchdb-find'));
 
-bootLog('已加载 pouchdb-core / mapreduce / replication / find');
+bootLog('已加载 pouchdb-core / mapreduce / replication / adapter-http / find');
 
 // leveldb 适配器单独 try/catch：它要求 leveldown 原生绑定可用，是设备上最容易失败的一步。
 // 失败必须把堆栈写进 node.log —— 否则顶层异常只会打到安卓不可见的 stderr，现象就是
@@ -158,6 +161,12 @@ function multiUserBasicAuth(userStore) {
       res.status(401).json({ error: 'unauthorized', reason: 'Authentication required.' });
       return;
     }
+    // 已由本层放行后，剥掉 Authorization 再交给 express-pouchdb：
+    // 它自带一套基于 _users 库 / 配置 admins 的鉴权，不认识 users.json 里的账户，
+    // 若保留凭据它会再走 multiUserLogIn 并抛 "Name or password is incorrect."(401)，
+    // 把已经通过校验的请求又拒一次。去掉后它按匿名处理——在未配置 config admins 时
+    // 匿名即拥有全部库权限，与本层「任何 active 用户均放行」的策略一致。
+    delete req.headers.authorization;
     next();
   };
 }
@@ -240,9 +249,13 @@ function createApp(opts, state) {
 
   // 多用户鉴权：users.json 非空即要求登录（admin / peer 均可）。
   // 取代原先的单账号 basicAuth；旧 --auth-user 已 seed 进 users.json（见 start()）。
-  if (state.userStore && state.userStore.hasAnyUser()) {
-    app.use(multiUserBasicAuth(state.userStore));
-  }
+  // 必须每次请求动态判断：账户可能在 App 启动后才通过控制端口 /admin/set 创建，
+  // 若在 createApp 时一次性判断并挂载，后创建的账户将完全不生效。
+  const basicAuthGate = multiUserBasicAuth(state.userStore);
+  app.use(function (req, res, next) {
+    if (!state.userStore.hasAnyUser()) return next();
+    return basicAuthGate(req, res, next);
+  });
 
   app.use('/', ExpressPouchDB(PouchDB, {
     mode: 'fullCouchDB',

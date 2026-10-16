@@ -6,6 +6,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawn } = require('child_process');
 const { start } = require('./main');
 
 let failures = 0;
@@ -19,10 +20,13 @@ function check(name, cond, extra) {
   }
 }
 
-async function req(base, method, url, body) {
+async function req(base, method, url, body, auth) {
+  const headers = {};
+  if (body) headers['Content-Type'] = 'application/json';
+  if (auth) headers['Authorization'] = 'Basic ' + Buffer.from(auth.user + ':' + auth.pass).toString('base64');
   const res = await fetch(base + url, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: Object.keys(headers).length ? headers : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -174,7 +178,6 @@ async function main() {
   try { fs.unlinkSync(path.join(dataDir, 'server.json')); } catch (e) { /* 可能不存在 */ }
 
   const childLog = [];
-  const { spawn } = require('child_process');
   const child = spawn(process.execPath, [path.join(__dirname, 'main.js')], {
     cwd: __dirname,
     env: Object.assign({}, process.env, {
@@ -295,6 +298,12 @@ async function main() {
     const bUsers = await req(B.ctl, 'GET', '/admin/status');
     check('B 已存在有效账户', bUsers.status === 200);
 
+    // CouchDB 语义：写入前库必须已存在（POST 到不存在的库返回 404 no_db_file）。
+    // 两份实例都显式建 shared 库，模拟 App 中「对端已有该库」的实际场景。
+    const authHeader = (u, p) => ({ Authorization: 'Basic ' + Buffer.from(u + ':' + p).toString('base64') });
+    const mkB = await fetch(B.base + '/shared', { method: 'PUT', headers: authHeader('adminB', 'pwB') });
+    check('B 创建 shared 库', mkB.status === 201 || mkB.status === 200, 'status=' + mkB.status);
+
     // B 写入文档，A 拉取（A 用自己在 B 的凭据）。B 已开鉴权，写文档需带 admin 凭据。
     const putB = await fetch(B.base + '/shared', {
       method: 'POST',
@@ -303,7 +312,7 @@ async function main() {
     });
     check('B 写入 docX（带鉴权）', putB.status === 201 || putB.status === 200, 'status=' + putB.status);
     await replicateOnce(A, B, 'shared', credsAonB);
-    const pulled = await req(A.base, 'GET', '/shared/docX');
+    const pulled = await req(A.base, 'GET', '/shared/docX', null, { user: 'adminA', pass: 'pwA' });
     check('A 从 B 同步到 docX', pulled.status === 200 && pulled.json.hello === 'fromB', JSON.stringify(pulled.json));
 
     // 反向：A 写入，B 拉取（B 用自己在 A 的凭据）
@@ -314,7 +323,7 @@ async function main() {
     });
     check('A 写入 docY（带鉴权）', putA.status === 201 || putA.status === 200, 'status=' + putA.status);
     await replicateOnce(B, A, 'shared', credsBonA);
-    const pulled2 = await req(B.base, 'GET', '/shared/docY');
+    const pulled2 = await req(B.base, 'GET', '/shared/docY', null, { user: 'adminB', pass: 'pwB' });
     check('B 从 A 同步到 docY', pulled2.status === 200 && pulled2.json.hello === 'fromA', JSON.stringify(pulled2.json));
   } catch (e) {
     check('配对与双向同步自测未抛异常', false, e && e.message);
