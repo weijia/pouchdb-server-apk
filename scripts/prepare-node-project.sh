@@ -71,8 +71,11 @@ done
 echo "[prepare-node-project] 复制到 assets..."
 rm -rf "${ASSETS_DIR}"
 mkdir -p "${ASSETS_DIR}"
-cp package.json main.js storage.js "${ASSETS_DIR}/"
+# 注意：main.js 依赖 ./storage ./users ./discovery，缺一不可；public/ 是网页管理页（/_admin）。
+# 旧版只拷了 storage.js 漏掉 users.js，会导致运行时 require('./users') 失败。
+cp package.json main.js storage.js users.js discovery.js "${ASSETS_DIR}/"
 cp -R node_modules "${ASSETS_DIR}/node_modules"
+cp -R public "${ASSETS_DIR}/public"
 
 # 构建标记：App 据此判断是否需要重新复制（升级 APK 后自动刷新）。
 # 注意文件名不要用点开头（如 .buildstamp）：aapt 打包 assets 时不一定收录点文件，

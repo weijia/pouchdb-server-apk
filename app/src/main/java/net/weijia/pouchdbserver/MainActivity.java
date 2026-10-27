@@ -7,10 +7,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.util.Log;
 import android.app.AlertDialog;
 import android.view.View;
@@ -45,7 +48,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 主界面：默认是内嵌浏览器（加载 Fauxton 管理界面 /_utils/），
+ * 主界面：默认是内嵌浏览器（加载本机 admin 管理页面 /_admin/），
  * 可切换到「状态/日志」页启停 Node 服务。
  *
  * 浏览器页必须等待 Node 数据端口（5984）真正监听后才打开网页：
@@ -56,6 +59,7 @@ public class MainActivity extends Activity {
 
     private static final String TAG = "MainActivity";
     private static final int REQ_NOTIFICATION = 1001;
+    private static final int REQ_IGNORE_BATTERY = 1002;
 
     private static final int COLOR_TAB_SELECTED = 0xFF3F51B5;
     private static final int COLOR_TAB_NORMAL = 0xFF9E9E9E;
@@ -189,6 +193,7 @@ public class MainActivity extends Activity {
         });
 
         // 默认进入浏览器页（未就绪时显示等待提示）。
+        maybeRequestBatteryOptimizationExemption();
         showBrowser();
     }
 
@@ -244,7 +249,8 @@ public class MainActivity extends Activity {
 
     /**
      * 根据服务器就绪状态决定浏览器页显示内容：
-     * 就绪且尚未加载过 → 打开 /_utils/；未就绪 → 显示等待提示并覆盖 WebView。
+     * 就绪且尚未加载过 → 打开本机 admin 管理页 /_admin/（与网页管理端完全一致）；
+     * 未就绪 → 显示等待提示并覆盖 WebView。
      */
     private void maybeLoadBrowser() {
         if (!browserVisible) {
@@ -253,7 +259,7 @@ public class MainActivity extends Activity {
         if (serverUp) {
             tvWait.setVisibility(View.GONE);
             if (!webViewLoaded) {
-                String url = "http://127.0.0.1:" + prefs.getPort() + "/_utils/";
+                String url = "http://127.0.0.1:" + prefs.getPort() + "/_admin/";
                 webView.loadUrl(url);
                 webViewLoaded = true;
             }
@@ -437,6 +443,42 @@ public class MainActivity extends Activity {
         return "http://127.0.0.1:" + prefs.getControlPort() + path;
     }
 
+    /** 把 Java mDNS 发现到的对端列表上报给 Node，供 admin 管理页 /peers 展示。 */
+    private void reportDiscoveredPeers(List<MdnsDiscovery.Peer> peers) {
+        try {
+            JSONArray devices = new JSONArray();
+            for (MdnsDiscovery.Peer p : peers) {
+                devices.put(new JSONObject()
+                        .put("deviceId", p.deviceId == null ? "" : p.deviceId)
+                        .put("instance", p.instance == null ? "" : p.instance)
+                        .put("host", p.host)
+                        .put("port", p.port)
+                        .put("scheme", "http"));
+            }
+            JSONObject body = new JSONObject().put("devices", devices);
+            Http.postJson(controlUrl("/peers/report"), body.toString(), null, null);
+        } catch (Throwable t) {
+            // 上报失败不影响 App 自身发现/配对。
+        }
+    }
+
+    /** 配对成功后把对端写入 Node peers.json（含凭据），网页端与 App 端保持一致。 */
+    private void reportPairResult(MdnsDiscovery.Peer peer, String user, String pass) {
+        try {
+            JSONObject body = new JSONObject()
+                    .put("deviceId", peer.deviceId == null ? "" : peer.deviceId)
+                    .put("instance", peer.instance == null ? "" : peer.instance)
+                    .put("host", peer.host)
+                    .put("port", peer.port)
+                    .put("scheme", "http")
+                    .put("user", user == null ? "" : user)
+                    .put("pass", pass == null ? "" : pass);
+            Http.postJson(controlUrl("/peer/register"), body.toString(), null, null);
+        } catch (Throwable t) {
+            // 忽略：下次仍可同步，仅网页端暂时看不到该对端。
+        }
+    }
+
     private void startDiscovery() {
         if (mdns == null) {
             mdns = new MdnsDiscovery(this, new MdnsDiscovery.Callback() {
@@ -446,6 +488,8 @@ public class MainActivity extends Activity {
                     for (MdnsDiscovery.Peer p : peers) {
                         peerMap.put(p.key(), p);
                     }
+                    // 发现靠安卓：把 mDNS 结果上报给 Node，admin 管理页 /peers 才能显示。
+                    reportDiscoveredPeers(peers);
                     mainHandler.post(new Runnable() {
                         @Override
                         public void run() {
@@ -550,6 +594,9 @@ public class MainActivity extends Activity {
                     }
                     prefs.putPeerCredential(peer.key(), user, pass);
                     prefs.putPairedDevice(peer.key(), peer.instance);
+                    // 把配对结果上报给 Node（写入 peers.json），admin 管理页才能按 peer 同步、
+                    // /sync/status 才能聚合，网页端与 App 端保持一致。
+                    reportPairResult(peer, user, pass);
                     toast("已与 " + peer.instance + " 配对");
                     mainHandler.post(new Runnable() {
                         @Override
@@ -796,6 +843,31 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    /**
+     * 引导用户把本应用从电池优化中豁免（Android 6+，仅提示一次）。
+     * 黑屏后系统进入 Doze，若应用被电池优化限制，进程会被冻结、网络被掐断，
+     * 即使连有线网络也一样；豁免后才能作为局域网常驻服务器稳定运行。
+     */
+    private void maybeRequestBatteryOptimizationExemption() {
+        if (prefs.isBatteryPrompted()) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                if (!pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                    Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    i.setData(Uri.parse("package:" + getPackageName()));
+                    startActivityForResult(i, REQ_IGNORE_BATTERY);
+                    // 无论用户是否允许，都不再重复打扰（仍可去系统设置里手动豁免）。
+                    prefs.setBatteryPrompted();
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "无法请求电池优化豁免（可去系统设置手动豁免）: " + t.getMessage());
+            }
+        }
     }
 
     private void toast(final String msg) {

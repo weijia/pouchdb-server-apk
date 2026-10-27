@@ -12,6 +12,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -57,6 +58,10 @@ public class NodeService extends Service {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private MdnsAdvertiser advertiser;
     private final Prefs prefs = new Prefs(this);
+
+    // 部分 WakeLock：防止系统在屏幕熄灭后让 CPU 睡死、把 Node 线程冻结。
+    // 注意：这只是保活的手段之一，最关键是电池优化豁免（Manifest + MainActivity 引导）。
+    private PowerManager.WakeLock wakeLock;
 
     private boolean nodeStarted;
     private volatile boolean starting;
@@ -164,17 +169,46 @@ public class NodeService extends Service {
         nodeStarted = false;
         mainHandler.removeCallbacks(watchdog);
         NodeBridge.clearNodeExitListener();
+        releaseWakeLock();
         executor.shutdownNow();
         super.onDestroy();
     }
 
     // ==================== 启动流程 ====================
 
+    /** 获取部分 WakeLock：让 Node 线程在屏幕熄灭后也能保持运行（Doze 防护之一）。 */
+    private void acquireWakeLock() {
+        try {
+            if (wakeLock == null) {
+                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PouchDB:NodeServer");
+                wakeLock.setReferenceCounted(false);
+            }
+            if (!wakeLock.isHeld()) {
+                wakeLock.acquire();
+                bootLog("已持有 PARTIAL_WAKE_LOCK");
+            }
+        } catch (Throwable t) {
+            bootLog("获取 WakeLock 失败（不影响服务）: " + t.getMessage());
+        }
+    }
+
+    private void releaseWakeLock() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+            }
+        } catch (Throwable t) {
+            bootLog("释放 WakeLock 异常（忽略）: " + t.getMessage());
+        }
+    }
+
     private void startServer() {
         stopping = false;
         starting = true;
         startAtMs = SystemClock.elapsedRealtime();
         startForegroundNotification("正在启动 CouchDB 兼容服务…");
+        acquireWakeLock();
         executor.execute(new Runnable() {
             @Override
             public void run() {
@@ -280,6 +314,12 @@ public class NodeService extends Service {
                 "--instance=" + prefs.getInstance(),
                 "--device-id=" + prefs.getDeviceId(),
                 "--log-file=" + logFile.getAbsolutePath(),
+                // 关闭 Node 侧 mDNS：安卓已有 Java 侧 MdnsAdvertiser，避免重复宣告
+                // _couchdb._tcp（同端口同实例宣告两次）。Node 侧 /peers 仍可列已配对对端。
+                "--no-mdns",
+                // 启用 adminRemote：admin 管理页（/_admin）经数据端口 /_admin/api 代理
+                // 控制端口，这样局域网电脑浏览器也能远程管理全部功能（需先设好 admin 账号）。
+                "--admin-remote",
         };
 
         String tmpDir = getCacheDir().getAbsolutePath();
@@ -404,6 +444,7 @@ public class NodeService extends Service {
         }
         mainHandler.removeCallbacks(watchdog);
         NodeBridge.clearNodeExitListener();
+        releaseWakeLock();
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -446,6 +487,7 @@ public class NodeService extends Service {
         dumpNodeLogToBoot(reason);
 
         mainHandler.removeCallbacks(watchdog);
+        releaseWakeLock();
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -489,7 +531,7 @@ public class NodeService extends Service {
 
     /**
      * 调用 startForeground。
-     * 1) API 34+ 传 dataSync 前台服务类型（与 manifest 声明一致）；
+     * 1) API 34+ 传 specialUse 前台服务类型（与 manifest 声明一致）；
      * 2) 任何异常都吞掉并记录，绝不向上抛——否则系统 5 秒超时强杀整个进程。
      */
     private void callStartForeground(Notification notification) {
@@ -500,13 +542,13 @@ public class NodeService extends Service {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 ServiceCompat.startForeground(this, NOTIFICATION_ID, notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-                bootLog("startForeground(dataSync) ok");
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                bootLog("startForeground(specialUse) ok");
                 return;
             }
         } catch (Throwable t) {
-            Log.e(TAG, "startForeground(dataSync) 失败，回退无类型", t);
-            bootLog("startForeground(dataSync) failed: " + t);
+            Log.e(TAG, "startForeground(specialUse) 失败，回退无类型", t);
+            bootLog("startForeground(specialUse) failed: " + t);
         }
         try {
             ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, 0);

@@ -7,9 +7,11 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 请求电池优化豁免：黑屏后系统进入 Doze 会冻结应用进程/掐断网络，豁免后服务才能常驻 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:name=".App"
@@ -19,15 +21,21 @@
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true">
 
-        <!-- 参照 go-stock-server 参考实现：用标准 dataSync 前台服务类型，
-             比 specialUse 更稳，Android 14+ 跑局域网 HTTP 服务必需。 -->
+        <!-- 参照 go-stock-server 参考实现：局域网 HTTP 服务属"长期后台运行"的特殊用途，
+             用 specialUse 前台服务类型（比 dataSync 更贴合服务器场景，也规避 Android 15
+             对 dataSync 的 6 小时超时限制）。dataSync 是给"用户发起的同步/备份"设计的，
+             会被系统省电策略重点照顾，黑屏后更容易被冻结/掐网。 -->
         <!-- 跑在独立进程 :node：Node 现在按官方姿势进程内嵌（JNI 专用线程），
              进程隔离让 Node 崩溃只结束本进程，界面进程不受影响，服务可被系统重启。 -->
         <service
             android:name=".NodeService"
             android:exported="false"
             android:process=":node"
-            android:foregroundServiceType="dataSync">
+            android:foregroundServiceType="specialUse">
+            <!-- specialUse 必须声明用途子类型（Android 14+ 校验） -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="LAN_CouchDB_PouchDB_server" />
         </service>
 
         <!-- 开机 / 应用更新后自动拉起前台服务（参照 go-stock-server） -->

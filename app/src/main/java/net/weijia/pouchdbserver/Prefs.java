@@ -24,6 +24,7 @@ public final class Prefs {
     private static final String KEY_PAIRING_ENABLED = "pairing_enabled";
     private static final String KEY_PEER_CREDENTIALS = "peer_credentials"; // JSON: deviceId -> {user,pass}
     private static final String KEY_PAIRED_DEVICES = "paired_devices"; // JSON: deviceId -> name
+    private static final String KEY_BATTERY_PROMPTED = "battery_prompted"; // 电池优化豁免引导是否已提示过
 
     public static final int DEFAULT_PORT = 5984;
     public static final int DEFAULT_CONTROL_PORT = 5985;
@@ -198,5 +199,14 @@ public final class Prefs {
         } catch (JSONException ignored) {
         }
         sp.edit().putString(key, o.toString()).apply();
+    }
+
+    /** 电池优化豁免引导是否已提示过（避免每次启动都弹窗打扰）。 */
+    public boolean isBatteryPrompted() {
+        return sp.getBoolean(KEY_BATTERY_PROMPTED, false);
+    }
+
+    public void setBatteryPrompted() {
+        sp.edit().putBoolean(KEY_BATTERY_PROMPTED, true).apply();
     }
 }

@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pouchdb-server 局域网管理</title>
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: #f6f7f9; color: #1f2328; }
+  header { padding: 16px 20px; background: #24292f; color: #fff; }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .meta { margin-top: 6px; font-size: 12px; color: #b8c0c8; word-break: break-all; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px 20px 40px; }
+  .card { background: #fff; border: 1px solid #e3e6ea; border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; }
+  .card h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .card h2 .spacer { flex: 1; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+  label { min-width: 84px; color: #57606a; }
+  input[type=text], input[type=password] { padding: 5px 8px; border: 1px solid #d0d7de; border-radius: 6px; }
+  button { padding: 5px 12px; border: 1px solid #d0d7de; background: #f6f8fa; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #eef1f4; }
+  button.primary { background: #1f883d; border-color: #1a7f37; color: #fff; }
+  button.primary:hover { background: #1a7f37; }
+  button.danger { background: #cf222e; border-color: #b62324; color: #fff; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eef1f4; font-size: 13px; }
+  th { color: #57606a; font-weight: 600; }
+  .empty { color: #8b949e; font-size: 13px; padding: 6px 0; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: #eef1f4; color: #57606a; }
+  .pill.on { background: #dafbe1; color: #1a7f37; }
+  .pill.off { background: #ffebe9; color: #cf222e; }
+  .msg { margin-top: 8px; font-size: 13px; color: #1a7f37; min-height: 18px; }
+  .msg.err { color: #cf222e; }
+  .warn { background: #fff8c5; border: 1px solid #d4a72c66; border-radius: 6px; padding: 8px 10px; font-size: 13px; margin-bottom: 14px; }
+  ul.dbs { list-style: none; padding: 0; margin: 6px 0; max-height: 260px; overflow: auto; }
+  ul.dbs li { padding: 2px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pouchdb-server 局域网管理</h1>
+  <div class="meta" id="meta">加载中…</div>
+</header>
+
+<main>
+  <div id="warnBox"></div>
+
+  <section class="card">
+    <h2>本机状态<span class="spacer"></span>
+      <button onclick="loadAll()">刷新</button>
+    </h2>
+    <div class="row"><label>实例</label><span id="sInstance">-</span></div>
+    <div class="row"><label>设备 ID</label><span id="sDevice">-</span></div>
+    <div class="row"><label>数据目录</label><span id="sDataDir">-</span></div>
+    <div class="row"><label>端口</label><span id="sPorts">-</span></div>
+    <div class="row"><label>鉴权</label><span id="sAuth">-</span></div>
+    <div class="row"><label>mDNS</label><span id="sMdns">-</span></div>
+    <div class="row"><label>配对开关</label><span id="sPairing">-</span>
+      <button onclick="setPairing(true)">开启</button>
+      <button onclick="setPairing(false)">关闭</button>
+    </div>
+    <div class="row"><label>注册开关</label><span id="sRegister">-</span>
+      <button onclick="setRegister(true)">开启</button>
+      <button onclick="setRegister(false)">关闭</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>本机管理账号</h2>
+    <div class="row"><label>用户名</label><input type="text" id="adminUser" autocomplete="off"></div>
+    <div class="row"><label>密码</label><input type="password" id="adminPass" autocomplete="new-password"></div>
+    <div class="row"><button class="primary" onclick="saveAdmin()">保存</button>
+      <span class="pill" id="adminState">-</span></div>
+    <div class="msg" id="adminMsg"></div>
+    <div class="empty">设置后数据端口将要求 Basic Auth 登录；留空则保持免鉴权（局域网可信时使用）。</div>
+  </section>
+
+  <section class="card">
+    <h2>待审批的配对请求<span class="spacer"></span><button onclick="loadRequests()">刷新</button></h2>
+    <div id="requests"><div class="empty">暂无</div></div>
+  </section>
+
+  <section class="card">
+    <h2>待审批的注册请求<span class="spacer"></span><button onclick="loadRegRequests()">刷新</button></h2>
+    <div class="empty">用户通过 <code>POST /_register</code> 提交注册（免鉴权，仅创建申请）；本机批准后账号才生效。</div>
+    <div id="regRequests"><div class="empty">加载中…</div></div>
+  </section>
+
+  <section class="card">
+    <h2>局域网设备<span class="spacer"></span><button onclick="loadPeers()">刷新</button></h2>
+    <div id="peers"><div class="empty">加载中…</div></div>
+  </section>
+
+  <section class="card">
+    <h2>同步<span class="spacer"></span><button onclick="loadReplications()">刷新</button></h2>
+    <div class="row"><label>对端</label><select id="peerSelect" onchange="loadPeerDbs()"></select>
+      <span class="empty" id="peerHint"></span></div>
+    <div id="peerDbs"></div>
+    <div class="row"><label><input type="checkbox" id="liveSync" checked> 持续同步（live）</label>
+      <button class="primary" onclick="syncSelected()">同步选中</button></div>
+    <div class="msg" id="syncMsg"></div>
+    <div id="replications"><div class="empty">暂无同步任务</div></div>
+  </section>
+  <section class="card">
+    <h2>同步状态<span class="spacer"></span><button onclick="loadSyncStatus()">刷新</button></h2>
+    <div class="empty">对比本机与每个已配对节点的每个库：本机文档数 vs 对端文档数，一致即代表完整同步。</div>
+    <div id="syncStatus"><div class="empty">加载中…</div></div>
+  </section>
+
+</main>
+
+<script>
+let STATUS = null;
+let CTL = '';
+
+function el(id) { return document.getElementById(id); }
+function text(id, v) { el(id).textContent = v; }
+function msg(id, v, isErr) {
+  const n = el(id);
+  n.textContent = v || '';
+  n.className = 'msg' + (isErr ? ' err' : '');
+}
+
+let AUTH = (function () {
+  try { return JSON.parse(localStorage.getItem('pouch_admin_auth') || 'null'); } catch (e) { return null; }
+})();
+function setAuth(u, p) {
+  AUTH = (u && p) ? { u, p } : null;
+  try {
+    if (AUTH) localStorage.setItem('pouch_admin_auth', JSON.stringify(AUTH));
+    else localStorage.removeItem('pouch_admin_auth');
+  } catch (e) { /* ignore */ }
+}
+
+async function api(base, path, options) {
+  options = options || {};
+  // 走 /_admin/api 代理（远程管理模式）时需带 admin 的 Basic Auth。
+  if (base.indexOf('/_admin/api') !== -1) {
+    if (!AUTH) {
+      const u = prompt('远程管理需登录，请输入 admin 用户名');
+      if (!u) throw new Error('已取消');
+      const p = prompt('请输入密码');
+      setAuth(u, p || '');
+    }
+    const h = options.headers || {};
+    h['Authorization'] = 'Basic ' + btoa(AUTH.u + ':' + AUTH.p);
+    options.headers = h;
+  }
+  const res = await fetch(base + path, options);
+  if (res.status === 401 || res.status === 403) {
+    setAuth(null, null); // 凭据失效/无权限，下次重新输入
+  }
+  const t = await res.text();
+  let json = null;
+  try { json = JSON.parse(t); } catch (e) { /* 非 JSON */ }
+  if (!res.ok) {
+    throw new Error((json && (json.reason || json.error)) || ('HTTP ' + res.status));
+  }
+  return json || {};
+}
+
+async function loadStatus() {
+  STATUS = await api('', '/_status');
+  const local = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
+  if (local) {
+    // 本机：直连控制端口（loopback，无需鉴权，功能全可用）
+    CTL = 'http://' + location.hostname + ':' + STATUS.controlPort;
+    el('warnBox').innerHTML = '';
+  } else {
+    // 远程：经数据端口 /_admin/api 代理控制端口，操作需 admin 账号登录
+    CTL = location.origin + '/_admin/api';
+    const hasAdmin = STATUS.authRequired;
+    el('warnBox').innerHTML = '<div class="warn">远程管理模式：管理操作经数据端口代理到控制端口，需 admin 账号登录。' +
+      (hasAdmin ? ''
+        : ' 当前<b>未设置管理账号</b>，请先在本机 admin 页面（<b>http://127.0.0.1:' +
+          (location.port || STATUS.port) + '/_admin/</b>）的「本机管理账号」里设置用户名密码。') + '</div>';
+  }
+  text('meta', '控制端口 ' + (local ? CTL : ('数据端口代理 /_admin/api · 控制端口 ' + STATUS.controlPort))
+    + ' · 数据端口 ' + location.origin + ' · ' + (STATUS.couchdb || ''));
+  text('sInstance', STATUS.instance);
+  text('sDevice', STATUS.deviceId);
+  text('sDataDir', STATUS.dataDir + '（来源：' + STATUS.dataDirSource + '）');
+  text('sPorts', 'HTTP ' + STATUS.port + (STATUS.httpsPort ? ' / HTTPS ' + STATUS.httpsPort : ' / HTTPS 未启用')
+    + ' / 控制 ' + STATUS.controlPort);
+  text('sAuth', STATUS.authRequired ? '已启用（users.json 非空）' : '关闭');
+  const m = STATUS.mdns || {};
+  el('sMdns').innerHTML = m.available
+    ? '<span class="pill on">已宣告 _couchdb._tcp</span>'
+    : '<span class="pill off">不可用：' + (m.error || '未知') + '</span>';
+  const p = STATUS.pairingEnabled;
+  el('sPairing').innerHTML = p
+    ? '<span class="pill on">开启（接受配对请求）</span>'
+    : '<span class="pill off">关闭</span>';
+  const r = STATUS.registerEnabled;
+  el('sRegister').innerHTML = r
+    ? '<span class="pill on">开启（接受注册申请）</span>'
+    : '<span class="pill off">关闭</span>';
+  const st = await api(CTL, '/admin/status').catch(() => ({ configured: false }));
+  el('adminState').textContent = st.configured ? '已设置' : '未设置';
+  el('adminState').className = 'pill' + (st.configured ? ' on' : '');
+}
+
+async function saveAdmin() {
+  const user = el('adminUser').value.trim();
+  const pass = el('adminPass').value;
+  if (!user || !pass) { msg('adminMsg', '用户名和密码均不能为空', true); return; }
+  try {
+    await api(CTL, '/admin/set', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user, pass }),
+    });
+    msg('adminMsg', '已保存（数据端口将要求登录）');
+    el('adminPass').value = '';
+    loadStatus();
+  } catch (e) { msg('adminMsg', e.message, true); }
+}
+
+async function setPairing(on) {
+  try {
+    await api(CTL, '/pairing/set', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!on }),
+    });
+    loadStatus();
+  } catch (e) { alert(e.message); }
+}
+
+async function setRegister(on) {
+  try {
+    await api(CTL, '/register/set', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!on }),
+    });
+    loadStatus();
+    loadRegRequests();
+  } catch (e) { alert(e.message); }
+}
+
+async function loadRequests() {
+  let data;
+  try { data = await api(CTL, '/pair/requests'); }
+  catch (e) { el('requests').innerHTML = '<div class="empty">无法访问控制端口：' + e.message + '</div>'; return; }
+  const list = (data.requests || []).filter((r) => r.state === 'pending');
+  if (!list.length) { el('requests').innerHTML = '<div class="empty">暂无待审批请求</div>'; return; }
+  el('requests').innerHTML = '<table><tr><th>设备</th><th>名称</th><th>时间</th><th>操作</th></tr>' +
+    list.map((r) => '<tr><td>' + (r.deviceId || '-') + '</td><td>' + (r.name || '-') + '</td><td>' +
+      new Date(r.createdAt).toLocaleString() + '</td><td>' +
+      '<button class="primary" onclick="approve(\'' + r.token + '\')">允许</button> ' +
+      '<button class="danger" onclick="deny(\'' + r.token + '\')">拒绝</button></td></tr>').join('') + '</table>';
+}
+
+async function approve(token) {
+  try { await api(CTL, '/pair/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) }); }
+  catch (e) { alert(e.message); }
+  loadRequests();
+}
+
+async function deny(token) {
+  try { await api(CTL, '/pair/deny', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) }); }
+  catch (e) { alert(e.message); }
+  loadRequests();
+}
+
+// ---------------- 网页注册：待审批列表与批准/拒绝 ----------------
+async function loadRegRequests() {
+  let data;
+  try { data = await api(CTL, '/register/requests'); }
+  catch (e) { el('regRequests').innerHTML = '<div class="empty">无法访问控制端口：' + e.message + '</div>'; return; }
+  if (data.enabled === false) {
+    el('regRequests').innerHTML = '<div class="empty">注册已关闭（POST /_register 返回 403）</div>';
+    return;
+  }
+  const list = (data.requests || []).filter((r) => r.state === 'pending');
+  if (!list.length) { el('regRequests').innerHTML = '<div class="empty">暂无待审批注册</div>'; return; }
+  el('regRequests').innerHTML = '<table><tr><th>用户名</th><th>来源 IP</th><th>时间</th><th>操作</th></tr>' +
+    list.map((r) => '<tr><td>' + (r.username || '-') + '</td><td>' + (r.ip || '-') + '</td><td>' +
+      new Date(r.createdAt).toLocaleString() + '</td><td>' +
+      '<button class="primary" onclick="approveReg(\'' + r.token + '\')">批准</button> ' +
+      '<button class="danger" onclick="denyReg(\'' + r.token + '\')">拒绝</button></td></tr>').join('') + '</table>';
+}
+
+async function approveReg(token) {
+  try {
+    const r = await api(CTL, '/register/approve', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }),
+    });
+    alert('已批准，用户名 ' + (r.user || '') + ' 现在可用该密码登录数据端口。');
+  } catch (e) { alert('批准失败：' + e.message); }
+  loadRegRequests();
+}
+
+async function denyReg(token) {
+  try { await api(CTL, '/register/deny', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) }); }
+  catch (e) { alert(e.message); }
+  loadRegRequests();
+}
+
+async function loadPeers() {
+  let data;
+  try { data = await api(CTL, '/peers'); }
+  catch (e) { el('peers').innerHTML = '<div class="empty">无法访问控制端口：' + e.message + '</div>'; return; }
+  const discovered = data.peers || [];
+  const offline = (data.paired || []).filter((p) => !p.online);
+  const all = discovered.concat(offline);
+  if (!all.length) {
+    el('peers').innerHTML = '<div class="empty">' + (data.available
+      ? '未发现其他实例（手机上需启动服务）' : 'mDNS 不可用：' + (data.error || '')) + '</div>';
+    return;
+  }
+  el('peers').innerHTML = '<table><tr><th>实例</th><th>地址</th><th>设备 ID</th><th>状态</th><th>操作</th></tr>' +
+    all.map((p) => '<tr><td>' + (p.instance || '-') + '</td><td>' + p.host + ':' + p.port + ' (' + (p.scheme || 'http') + ')</td><td>' +
+      (p.deviceId || '-') + '</td><td>' + (p.paired ? '<span class="pill on">已配对</span>' : '<span class="pill">未配对</span>')
+      + (p.online === false ? ' <span class="pill off">离线</span>' : '') + '</td><td>' +
+      (p.paired ? '<button onclick="selectPeer(\'' + (p.deviceId || (p.host + ':' + p.port)) + '\')">同步</button>'
+                : '<button class="primary" onclick="pairPeer(\'' + p.host + '\',' + p.port + ',\'' + (p.deviceId || '') + '\',\'' + (p.instance || '') + '\')">配对</button>')
+      + '</td></tr>').join('') + '</table>';
+}
+
+async function pairPeer(host, port, deviceId, instance) {
+  msg('syncMsg', '');
+  try {
+    el('peers').insertAdjacentHTML('afterbegin', '<div class="empty">已发起配对请求，等待对方在「待审批请求」里点允许…</div>');
+    const r = await api(CTL, '/peer/pair', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, port, deviceId, instance, waitMs: 60000 }),
+    });
+    alert('配对成功：' + r.key);
+    loadPeers();
+  } catch (e) { alert('配对失败：' + e.message); loadPeers(); }
+}
+
+async function loadPeerSelect() {
+  let data;
+  try { data = await api(CTL, '/peers'); }
+  catch (e) { return; }
+  const list = (data.paired || []);
+  const sel = el('peerSelect');
+  const cur = sel.value;
+  sel.innerHTML = list.map((p) => '<option value="' + p.key + '">' + (p.instance || p.key) + '（' + p.host + ':' + p.port + '）</option>').join('');
+  if (cur && list.some((p) => p.key === cur)) sel.value = cur;
+  if (!list.length) el('peerHint').textContent = '（尚未配对任何设备）';
+  else el('peerHint').textContent = '';
+}
+
+function selectPeer(key) {
+  loadPeerSelect().then(() => {
+    el('peerSelect').value = key;
+    loadPeerDbs();
+  });
+  document.querySelector('section:last-of-type').scrollIntoView({ behavior: 'smooth' });
+}
+
+async function loadPeerDbs() {
+  const key = el('peerSelect').value;
+  if (!key) { el('peerDbs').innerHTML = ''; return; }
+  let data;
+  try { data = await api(CTL, '/peer/dbs?key=' + encodeURIComponent(key)); }
+  catch (e) { el('peerDbs').innerHTML = '<div class="empty">' + e.message + '</div>'; return; }
+  const dbs = data.databases || [];
+  if (!dbs.length) { el('peerDbs').innerHTML = '<div class="empty">对方没有数据库</div>'; return; }
+  el('peerDbs').innerHTML = '<ul class="dbs">' + dbs.map((d) =>
+    '<li><label><input type="checkbox" class="dbchk" value="' + d + '"> ' + d + '</label></li>').join('') + '</ul>';
+}
+
+async function syncSelected() {
+  const key = el('peerSelect').value;
+  if (!key) { msg('syncMsg', '请先选择对端', true); return; }
+  const dbs = Array.from(document.querySelectorAll('.dbchk:checked')).map((c) => c.value);
+  if (!dbs.length) { msg('syncMsg', '请至少勾选一个数据库', true); return; }
+  const live = el('liveSync').checked;
+  let ok = 0, failed = '';
+  for (const db of dbs) {
+    try {
+      await api(CTL, '/replicate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ db, peer: key, live }),
+      });
+      ok++;
+    } catch (e) { failed = e.message; }
+  }
+  msg('syncMsg', '已提交 ' + ok + '/' + dbs.length + ' 个同步任务' + (failed ? '（最后一个失败：' + failed + '）' : ''), !!failed);
+  loadReplications();
+}
+
+async function loadReplications() {
+  let data;
+  try { data = await api(CTL, '/replications'); }
+  catch (e) { el('replications').innerHTML = '<div class="empty">' + e.message + '</div>'; return; }
+  const list = data.replications || [];
+  if (!list.length) { el('replications').innerHTML = '<div class="empty">暂无同步任务</div>'; return; }
+  el('replications').innerHTML = '<table><tr><th>库</th><th>对端</th><th>状态</th><th>last_seq</th><th>错误</th><th>操作</th></tr>' +
+    list.map((r) => '<tr><td>' + r.db + '</td><td>' + r.remote + '</td><td>' +
+      (r.status === 'active' ? '<span class="pill on">active</span>' : '<span class="pill">' + r.status + '</span>') +
+      '</td><td>' + (r.lastSeq === null || r.lastSeq === undefined ? '-' : String(r.lastSeq).slice(0, 24)) +
+      '</td><td>' + (r.error || '-') + '</td><td><button onclick="stopRep(\'' + r.key + '\')">停止</button></td></tr>').join('') + '</table>';
+}
+
+async function stopRep(key) {
+  try {
+    await api(CTL, '/replicate/stop', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }),
+    });
+  } catch (e) { alert(e.message); }
+  loadReplications();
+}
+
+async function loadSyncStatus() {
+  let data;
+  try { data = await api(CTL, '/sync/status'); }
+  catch (e) { el('syncStatus').innerHTML = '<div class="empty">无法访问控制端口：' + e.message + '</div>'; return; }
+  const peers = data.peers || [];
+  if (!peers.length) { el('syncStatus').innerHTML = '<div class="empty">尚未配对任何节点（先在「局域网设备」里配对）</div>'; return; }
+  let html = '';
+  for (const p of peers) {
+    const dbs = p.databases || [];
+    const tag = p.online === false ? ' <span class="pill off">离线</span>' : '';
+    html += '<div style="margin:6px 0"><b>' + (p.instance || p.key) + '</b>'
+      + '（' + p.host + ':' + p.port + '）' + tag + '</div>';
+    if (!dbs.length) { html += '<div class="empty">无用户数据库</div><br>'; continue; }
+    html += '<table><tr><th>库</th><th>本机文档</th><th>对端文档</th><th>是否一致</th><th>状态</th><th>最后同步时间</th><th>事件</th></tr>'
+      + dbs.map((d) => {
+        const when = d.lastSyncAt ? new Date(d.lastSyncAt).toLocaleString() : '-';
+        const ld = d.localDocs == null ? '-' : d.localDocs;
+        const rd = d.remoteDocs == null ? '-' : d.remoteDocs;
+        return '<tr><td>' + d.db + '</td><td>' + ld + '</td><td>' + rd + '</td>'
+          + '<td>' + (d.consistent ? '<span class="pill on">一致</span>' : '<span class="pill off">不一致</span>') + '</td>'
+          + '<td>' + d.status + '</td><td>' + when + '</td><td>' + (d.lastEvent || '-') + '</td></tr>';
+      }).join('') + '</table><br>';
+  }
+  el('syncStatus').innerHTML = html;
+}
+
+async function loadAll() {
+  await loadStatus().catch((e) => { el('meta').textContent = '状态加载失败：' + e.message; });
+  await loadRequests();
+  await loadRegRequests();
+  await loadPeers();
+  await loadPeerSelect();
+  await loadReplications();
+  await loadSyncStatus();
+}
+
+loadAll();
+setInterval(loadReplications, 5000);
+setInterval(loadRequests, 8000);
+setInterval(loadRegRequests, 8000);
+setInterval(loadPeers, 15000);
+setInterval(loadSyncStatus, 10000);
+</script>
+</body>
+</html>

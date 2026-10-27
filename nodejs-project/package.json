@@ -2,7 +2,7 @@
   "name": "pouchdb-server-node",
   "version": "1.0.0",
   "private": true,
-  "description": "CouchDB 兼容服务端（PouchDB + express-pouchdb），运行在 nodejs-mobile 中",
+  "description": "CouchDB 兼容服务端（PouchDB + express-pouchdb），运行在 nodejs-mobile 中；含 HTTPS / 网页管理页 / 配对 / 同步状态聚合",
   "main": "main.js",
   "scripts": {
     "start": "node main.js",
