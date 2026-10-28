@@ -182,6 +182,14 @@
                     android:text="Node 输出（node.log 尾部）"
                     android:textAppearance="?android:attr/textAppearanceSmall" />
 
+                <Button
+                    android:id="@+id/btnCopyLog"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="end"
+                    android:text="复制日志"
+                    android:textSize="11sp" />
+
                 <TextView
                     android:id="@+id/tvLog"
                     android:layout_width="match_parent"

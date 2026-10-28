@@ -3,6 +3,8 @@ package net.weijia.pouchdbserver;
 import android.Manifest;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -78,6 +80,7 @@ public class MainActivity extends Activity {
     private TextView tvDb;
     private Button btnToggle;
     private Button btnRefresh;
+    private Button btnCopyLog;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final java.util.concurrent.ExecutorService executor =
@@ -104,6 +107,7 @@ public class MainActivity extends Activity {
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private final AtomicBoolean alive = new AtomicBoolean(true);
     private ScheduledFuture<?> pollFuture;
+    private ScheduledFuture<?> logRefreshFuture;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
@@ -137,6 +141,7 @@ public class MainActivity extends Activity {
         tvDb = findViewById(R.id.tvDb);
         btnToggle = findViewById(R.id.btnToggle);
         btnRefresh = findViewById(R.id.btnRefresh);
+        btnCopyLog = findViewById(R.id.btnCopyLog);
 
         setupWebView();
 
@@ -164,6 +169,12 @@ public class MainActivity extends Activity {
             public void onClick(View v) {
                 refreshLog();
                 schedulePoll(0);
+            }
+        });
+        btnCopyLog.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                copyLogToClipboard();
             }
         });
 
@@ -234,6 +245,7 @@ public class MainActivity extends Activity {
         statusPanel.setVisibility(View.GONE);
         tabBrowser.setBackgroundColor(COLOR_TAB_SELECTED);
         tabStatus.setBackgroundColor(COLOR_TAB_NORMAL);
+        stopLogAutoRefresh();
         maybeLoadBrowser();
     }
 
@@ -245,6 +257,25 @@ public class MainActivity extends Activity {
         tabStatus.setBackgroundColor(COLOR_TAB_SELECTED);
         renderDatabases();
         refreshLog();
+        startLogAutoRefresh();
+    }
+
+    /** 在状态页时每 5s 自动刷新日志，方便实时观察启动/崩溃过程。 */
+    private void startLogAutoRefresh() {
+        if (logRefreshFuture != null && !logRefreshFuture.isDone()) return;
+        logRefreshFuture = scheduler.scheduleWithFixedDelay(new Runnable() {
+            @Override
+            public void run() {
+                if (alive.get() && !browserVisible) refreshLog();
+            }
+        }, 5, 5, TimeUnit.SECONDS);
+    }
+
+    private void stopLogAutoRefresh() {
+        if (logRefreshFuture != null) {
+            logRefreshFuture.cancel(false);
+            logRefreshFuture = null;
+        }
     }
 
     /**
@@ -378,6 +409,8 @@ public class MainActivity extends Activity {
         startPolling();
         startDiscovery();
         startApprovalPolling();
+        // 若当前在状态页，恢复日志自动刷新
+        if (!browserVisible) startLogAutoRefresh();
     }
 
     @Override
@@ -385,6 +418,7 @@ public class MainActivity extends Activity {
         unregisterStateReceiver();
         stopDiscovery();
         stopApprovalPolling();
+        stopLogAutoRefresh();
         super.onPause();
     }
 
@@ -907,11 +941,44 @@ public class MainActivity extends Activity {
         executor.execute(new Runnable() {
             @Override
             public void run() {
+                final File filesDir = getFilesDir();
+                final File dataDir = new File(filesDir, "data");
                 StringBuilder sb = new StringBuilder();
-                sb.append("==== node.log（Node 输出）====\n")
-                        .append(readTail(new File(getFilesDir(), "node.log"), 8000));
-                sb.append("\n\n==== boot.log（启动步骤）====\n")
-                        .append(readTail(new File(getFilesDir(), "boot.log"), 4000));
+
+                // ---- 服务概览：心跳存活 + server.json 状态 ----
+                sb.append("==== 服务状态 ====\n");
+                sb.append("心跳: ").append(heartbeatStatus(dataDir)).append('\n');
+                sb.append("数据目录: ").append(dataDir.getAbsolutePath()).append('\n');
+                String serverJson = readSmallFile(new File(dataDir, "server.json"), 1024);
+                if (serverJson != null) {
+                    sb.append("server.json: ").append(serverJson).append('\n');
+                }
+                sb.append('\n');
+
+                // ---- node.log（Node 全部输出，含 boot 诊断与 console）----
+                sb.append("==== node.log（Node 输出，尾部 16KB）====\n");
+                TailResult tr = readTailResult(new File(filesDir, "node.log"), 16 * 1024);
+                sb.append(tr.text);
+                sb.append("\n[文件 ").append(tr.size).append(" 字节，已显示 ")
+                        .append(tr.read).append(" 字节]\n\n");
+
+                // ---- boot.log（Android 启动步骤 + 失败时 node.log 末尾）----
+                sb.append("==== boot.log（启动步骤，尾部 8KB）====\n");
+                tr = readTailResult(new File(filesDir, "boot.log"), 8 * 1024);
+                sb.append(tr.text);
+                sb.append("\n[文件 ").append(tr.size).append(" 字节，已显示 ")
+                        .append(tr.read).append(" 字节]\n\n");
+
+                // ---- crash.log（Java 未捕获异常，有就显示）----
+                File crashFile = new File(filesDir, "crash.log");
+                if (crashFile.exists()) {
+                    sb.append("==== crash.log（崩溃堆栈，尾部 8KB）====\n");
+                    tr = readTailResult(crashFile, 8 * 1024);
+                    sb.append(tr.text);
+                    sb.append("\n[文件 ").append(tr.size).append(" 字节，已显示 ")
+                            .append(tr.read).append(" 字节]\n");
+                }
+
                 final String log = sb.toString();
                 mainHandler.post(new Runnable() {
                     @Override
@@ -923,21 +990,80 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** 读取文件尾部最多 max 字节，文件不存在时返回提示。 */
-    private String readTail(File file, int max) {
-        if (file == null || !file.exists()) {
-            return "（无 " + (file == null ? "" : file.getName()) + "）";
-        }
+    /** 心跳状态：文件是否存在 + 最后修改距今多久。 */
+    private String heartbeatStatus(File dataDir) {
+        File hb = new File(dataDir, "heartbeat");
+        if (!hb.exists()) return "（无 heartbeat 文件）";
+        long age = System.currentTimeMillis() - hb.lastModified();
+        if (age < 0) age = 0;
+        return age > 90_000
+                ? "过期 " + (age / 1000) + "s ⚠"
+                : "正常（" + (age / 1000) + "s 前更新）";
+    }
+
+    /** 读取小文件全文，失败返回 null。 */
+    private String readSmallFile(File file, int max) {
+        if (file == null || !file.exists()) return null;
         try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
-            long length = raf.length();
-            int size = (int) Math.min(length, max);
-            if (size <= 0) return "（空）";
-            raf.seek(length - size);
+            int size = (int) Math.min(raf.length(), max);
+            if (size <= 0) return "";
             byte[] buf = new byte[size];
             raf.readFully(buf);
             return new String(buf, StandardCharsets.UTF_8);
         } catch (Exception e) {
-            return "读取失败: " + e.getMessage();
+            return null;
+        }
+    }
+
+    /** readTail 的结果类，附带文件大小与实际读取字节数。 */
+    private static class TailResult {
+        final String text;
+        final long size;
+        final int read;
+        TailResult(String text, long size, int read) {
+            this.text = text; this.size = size; this.read = read;
+        }
+    }
+
+    private TailResult readTailResult(File file, int max) {
+        if (file == null || !file.exists()) {
+            return new TailResult("（无 " + (file == null ? "" : file.getName()) + "）", 0, 0);
+        }
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            long length = raf.length();
+            int size = (int) Math.min(length, max);
+            if (size <= 0) return new TailResult("（空）", length, 0);
+            raf.seek(length - size);
+            byte[] buf = new byte[size];
+            raf.readFully(buf);
+            return new TailResult(new String(buf, StandardCharsets.UTF_8), length, size);
+        } catch (Exception e) {
+            return new TailResult("读取失败: " + e.getMessage(), file.length(), 0);
+        }
+    }
+
+    /** 读取文件尾部最多 max 字节，文件不存在时返回提示（保留旧签名供其他调用方用）。 */
+    private String readTail(File file, int max) {
+        return readTailResult(file, max).text;
+    }
+
+    /** 把当前日志视图的全部内容复制到剪贴板，方便粘贴给开发者排查。 */
+    private void copyLogToClipboard() {
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm == null) {
+                Toast.makeText(this, "剪贴板不可用", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            CharSequence text = tvLog.getText();
+            if (text == null || text.length() == 0) {
+                Toast.makeText(this, "日志为空", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            cm.setPrimaryClip(ClipData.newPlainText("pouchdb-log", text));
+            Toast.makeText(this, "日志已复制（" + text.length() + " 字符）", Toast.LENGTH_SHORT).show();
+        } catch (Throwable t) {
+            Toast.makeText(this, "复制失败: " + t.getMessage(), Toast.LENGTH_SHORT).show();
         }
     }
 
