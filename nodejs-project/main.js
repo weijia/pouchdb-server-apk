@@ -1126,17 +1126,45 @@ function parseArgs(argv) {
     'no-register': 'noRegister',
   };
   const out = {};
-  (argv || []).forEach((arg) => {
-    if (!arg || arg.indexOf('--') !== 0) return;
+  const a = argv || [];
+  for (let i = 0; i < a.length; i++) {
+    const arg = a[i];
+    if (!arg || arg.indexOf('--') !== 0) continue;
     const eq = arg.indexOf('=');
-    const key = eq < 0 ? arg.slice(2) : arg.slice(2, eq);
-    const val = eq < 0 ? 'true' : arg.slice(eq + 1);
+    let key, val;
+    if (eq >= 0) {
+      key = arg.slice(2, eq);
+      val = arg.slice(eq + 1);
+    } else {
+      key = arg.slice(2);
+      if (flags[key]) {
+        val = 'true';
+      } else {
+        // 非 flag 选项：取下一个 argv 作为值（--key value 形式）。
+        // 若下一个元素不存在或是另一个 --option，则视为无值布尔开关。
+        const next = a[i + 1];
+        if (next === undefined || next.indexOf('--') === 0) {
+          val = 'true';
+        } else {
+          val = next;
+          i++;
+        }
+      }
+    }
     if (flags[key]) {
       out[flags[key]] = val !== 'false';
-      return;
+      continue;
     }
-    if (map[key]) out[map[key]] = numeric[key] ? Number(val) : val;
-  });
+    if (map[key]) {
+      if (numeric[key]) {
+        const n = Number(val);
+        // 数值型参数解析失败时跳过，保留 defaults() 中的默认值，避免 NaN 端口崩溃
+        if (!isNaN(n)) out[map[key]] = n;
+      } else {
+        out[map[key]] = val;
+      }
+    }
+  }
   // --no-register 是 --allow-register 的反面开关，统一折算成 allowRegister
   if (out.noRegister === true) out.allowRegister = false;
   return out;
