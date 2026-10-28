@@ -54,6 +54,7 @@
     <div class="row"><label>设备 ID</label><span id="sDevice">-</span></div>
     <div class="row"><label>数据目录</label><span id="sDataDir">-</span></div>
     <div class="row"><label>端口</label><span id="sPorts">-</span></div>
+    <div class="row"><label>局域网地址</label><span id="sLan">-</span></div>
     <div class="row"><label>鉴权</label><span id="sAuth">-</span></div>
     <div class="row"><label>mDNS</label><span id="sMdns">-</span></div>
     <div class="row"><label>配对开关</label><span id="sPairing">-</span>
@@ -183,6 +184,12 @@ async function loadStatus() {
   text('sDataDir', STATUS.dataDir + '（来源：' + STATUS.dataDirSource + '）');
   text('sPorts', 'HTTP ' + STATUS.port + (STATUS.httpsPort ? ' / HTTPS ' + STATUS.httpsPort : ' / HTTPS 未启用')
     + ' / 控制 ' + STATUS.controlPort);
+  // 局域网访问地址：方便从电脑浏览器/客户端连接。0.0.0.0 监听本身已允许外部连接，
+  // 这里只做展示，不影响实际监听行为。
+  const lanIp = STATUS.lanIp || '';
+  text('sLan', lanIp
+    ? 'http://' + lanIp + ':' + STATUS.port + '/  （电脑/客户端可访问）'
+    : '（未获取到局域网 IP，检查 WiFi 是否连接）');
   text('sAuth', STATUS.authRequired ? '已启用（users.json 非空）' : '关闭');
   const m = STATUS.mdns || {};
   el('sMdns').innerHTML = m.available

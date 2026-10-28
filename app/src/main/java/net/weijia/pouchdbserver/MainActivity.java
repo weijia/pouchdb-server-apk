@@ -221,6 +221,11 @@ public class MainActivity extends Activity {
         webView.getSettings().setDomStorageEnabled(true);
         webView.getSettings().setDatabaseEnabled(true);
         webView.getSettings().setAllowFileAccess(false);
+        // 允许混合内容：管理页从 http://127.0.0.1:5984 加载，JS 再 fetch
+        // http://127.0.0.1:5985（控制端口），某些 WebView 版本会把跨端口 HTTP
+        // 请求当作混合内容拦截，导致 "fetch failed"。
+        webView.getSettings().setMixedContentMode(
+                android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         // WebView 调试（chrome://inspect），仅本地调试用，无碍发布。
         WebView.setWebContentsDebuggingEnabled(true);
 
@@ -243,6 +248,14 @@ public class MainActivity extends Activity {
                 } else {
                     handler.cancel();
                 }
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request,
+                                        android.webkit.WebResourceError error) {
+                // 记录资源加载失败，方便排查 fetch failed / 网络错误。
+                Log.w(TAG, "WebView 资源加载失败: " + request.getUrl()
+                        + " err=" + error.getErrorCode() + " " + error.getDescription());
             }
         });
     }

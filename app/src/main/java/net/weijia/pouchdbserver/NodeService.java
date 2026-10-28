@@ -342,12 +342,19 @@ public class NodeService extends Service {
 
         nodeStarted = true;
         bootLog("Node 已在专用线程启动");
+        bootLog("本机局域网 IP: " + NetUtils.getLanIp(this)
+                + " 数据端口: " + Prefs.DEFAULT_PORT + "（0.0.0.0，对外可达）");
 
         // 启动 mDNS 宣告，使本机在局域网内可被其他 pouchdb-server 发现（互为配对需要双向）。
         // 端口固定为数据端口，device_id 取自 Prefs（稳定身份）。
         try {
             if (advertiser == null) {
-                advertiser = new MdnsAdvertiser(this, null);
+                advertiser = new MdnsAdvertiser(this, new MdnsAdvertiser.Callback() {
+                    @Override
+                    public void onState(String state, String detail) {
+                        bootLog("mDNS 宣告[" + state + "] " + (detail == null ? "" : detail));
+                    }
+                });
             }
             advertiser.start(prefs.getInstance(), Prefs.DEFAULT_PORT, prefs.getDeviceId());
         } catch (Throwable t) {

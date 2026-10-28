@@ -299,6 +299,21 @@ async function closeAllDbs() {
   return all;
 }
 
+/** 取第一个非 loopback 的 IPv4 地址，供管理页展示局域网访问地址。 */
+function getLanIpv4() {
+  try {
+    const ifaces = os.networkInterfaces() || {};
+    for (const name of Object.keys(ifaces)) {
+      for (const ni of ifaces[name] || []) {
+        if (ni && ni.family === 'IPv4' && !ni.internal) {
+          return ni.address;
+        }
+      }
+    }
+  } catch (e) { /* ignore */ }
+  return '';
+}
+
 // ==================== 数据端口 ====================
 function createApp(opts, state) {
   const app = express();
@@ -339,6 +354,8 @@ function createApp(opts, state) {
             ? { available: true, registered: state.discovery.registered }
             : { available: false, error: state.discovery.error })
         : { available: true, note: 'Android NSD（系统服务发现）' },
+      // 局域网 IPv4：供管理页展示「从电脑浏览器访问 http://<lanIp>:<port>/」。
+      lanIp: getLanIpv4(),
       databases: state.store.stats(),
     });
   });
@@ -650,7 +667,10 @@ function createControlApp(opts, state) {
       }
     });
     res.json({
-      available: !!(state.discovery && state.discovery.available) || (state.androidPeers || []).length > 0,
+      // --no-mdns 时 state.discovery 不存在，mDNS 由安卓 Java 侧 NSD 管理，
+      // 不能因此报「不可用」——否则局域网没节点时界面会误导为 mDNS 挂了。
+      available: (state.discovery ? state.discovery.available : true)
+        || (state.androidPeers || []).length > 0,
       error: state.discovery ? state.discovery.error : '',
       androidReportedAt: state.androidPeersAt || 0,
       peers: discovered.map((p) => Object.assign({}, p, {
