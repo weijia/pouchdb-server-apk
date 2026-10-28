@@ -64,23 +64,34 @@ jobs:
       with:
         gradle-version: '7.5'
 
-    # ========== 版本号处理（参照 go-stock-server：从 git tag / run_number 计算，交由 Gradle 读取）==========
+    # ========== 版本号处理 ==========
+    # VERSION_CODE 取 git commit 数量（单调递增，和代码进度强绑定），
+    # 不再用 GITHUB_RUN_NUMBER——后者和 GitHub UI 显示的 run # 可能不一致
+    # （取消/重跑/历史 run 都会让两者错位），导致 "build 41 产出的包是 38" 的困惑。
     - name: Compute version
       id: version
       run: |
+        # commit 数量作为 versionCode：永远单调递增，和代码进度一一对应
+        COMMIT_COUNT=$(git rev-list --count HEAD)
         if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
           VERSION="${GITHUB_REF_NAME#v}"
         else
-          VERSION="ci-${GITHUB_RUN_NUMBER}"
+          VERSION="ci-${COMMIT_COUNT}"
         fi
         echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-        echo "VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
-        APK_NAME="pouchdb-server-apk-${VERSION}-build${GITHUB_RUN_NUMBER}.apk"
-        ZIP_NAME="pouchdb-server-apk-${VERSION}-build${GITHUB_RUN_NUMBER}.zip"
+        echo "VERSION_CODE=${COMMIT_COUNT}" >> "$GITHUB_ENV"
+        APK_NAME="pouchdb-server-apk-${VERSION}-build${COMMIT_COUNT}.apk"
+        ZIP_NAME="pouchdb-server-apk-${VERSION}-build${COMMIT_COUNT}.zip"
         echo "apk_name=${APK_NAME}" >> "$GITHUB_OUTPUT"
         echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
         echo "version_name=${VERSION}" >> "$GITHUB_OUTPUT"
-        echo "version_code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+        echo "version_code=${COMMIT_COUNT}" >> "$GITHUB_OUTPUT"
+        # 打印对账信息，CI 日志里直接可见
+        echo "=== 版本号 ==="
+        echo "GITHUB_RUN_NUMBER=${GITHUB_RUN_NUMBER}（UI 显示的 run #）"
+        echo "COMMIT_COUNT=${COMMIT_COUNT}（versionCode）"
+        echo "VERSION_NAME=${VERSION}"
+        echo "APK=${APK_NAME}"
 
     # ========== 签名 + 构建 ==========
     - name: Setup Release Keystore and Build
