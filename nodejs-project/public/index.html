@@ -186,7 +186,7 @@ async function loadStatus() {
   text('sAuth', STATUS.authRequired ? '已启用（users.json 非空）' : '关闭');
   const m = STATUS.mdns || {};
   el('sMdns').innerHTML = m.available
-    ? '<span class="pill on">已宣告 _couchdb._tcp</span>'
+    ? '<span class="pill on">' + (m.note || '已宣告 _couchdb._tcp') + '</span>'
     : '<span class="pill off">不可用：' + (m.error || '未知') + '</span>';
   const p = STATUS.pairingEnabled;
   el('sPairing').innerHTML = p
@@ -327,7 +327,21 @@ async function pairPeer(host, port, deviceId, instance) {
     });
     alert('配对成功：' + r.key);
     loadPeers();
-  } catch (e) { alert('配对失败：' + e.message); loadPeers(); }
+  } catch (e) {
+    const msg = e.message || '';
+    let hint = '';
+    if (msg.indexOf('pairing disabled') >= 0 || msg.indexOf('forbidden') >= 0) {
+      hint = '\n\n可能原因：对方未开启「配对开关」。请在对方设备的管理页「本机状态 → 配对开关」点「开启」后重试。';
+    } else if (msg.indexOf('timeout') >= 0 || msg.indexOf('502') >= 0 || msg.indexOf('ECONNREFUSED') >= 0) {
+      hint = '\n\n可能原因：无法连接到对方数据端口 ' + host + ':' + port + '。请确认对方服务已启动、两台设备在同一 WiFi、且对方未开启 AP 隔离。';
+    } else if (msg.indexOf('pair_timeout') >= 0 || msg.indexOf('对方未审批') >= 0) {
+      hint = '\n\n对方 60 秒内未在「待审批请求」里点「允许」。';
+    } else if (msg.indexOf('denied') >= 0) {
+      hint = '\n\n对方拒绝了配对请求。';
+    }
+    alert('配对失败：' + msg + hint);
+    loadPeers();
+  }
 }
 
 async function loadPeerSelect() {

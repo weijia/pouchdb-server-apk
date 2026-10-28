@@ -182,13 +182,26 @@
                     android:text="Node 输出（node.log 尾部）"
                     android:textAppearance="?android:attr/textAppearanceSmall" />
 
-                <Button
-                    android:id="@+id/btnCopyLog"
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_gravity="end"
-                    android:text="复制日志"
-                    android:textSize="11sp" />
+                    android:gravity="end"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btnClearLog"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="清空日志"
+                        android:textSize="11sp" />
+
+                    <Button
+                        android:id="@+id/btnCopyLog"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="复制日志"
+                        android:textSize="11sp" />
+                </LinearLayout>
 
                 <TextView
                     android:id="@+id/tvLog"

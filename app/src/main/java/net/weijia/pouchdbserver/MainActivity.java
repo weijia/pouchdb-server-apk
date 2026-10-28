@@ -81,6 +81,7 @@ public class MainActivity extends Activity {
     private Button btnToggle;
     private Button btnRefresh;
     private Button btnCopyLog;
+    private Button btnClearLog;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final java.util.concurrent.ExecutorService executor =
@@ -142,6 +143,7 @@ public class MainActivity extends Activity {
         btnToggle = findViewById(R.id.btnToggle);
         btnRefresh = findViewById(R.id.btnRefresh);
         btnCopyLog = findViewById(R.id.btnCopyLog);
+        btnClearLog = findViewById(R.id.btnClearLog);
 
         setupWebView();
 
@@ -175,6 +177,12 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 copyLogToClipboard();
+            }
+        });
+        btnClearLog.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                clearLogs();
             }
         });
 
@@ -1065,6 +1073,33 @@ public class MainActivity extends Activity {
         } catch (Throwable t) {
             Toast.makeText(this, "复制失败: " + t.getMessage(), Toast.LENGTH_SHORT).show();
         }
+    }
+
+    /** 清空 node.log / boot.log / crash.log（不影响 Node 运行时继续写入）。 */
+    private void clearLogs() {
+        executor.execute(new Runnable() {
+            @Override
+            public void run() {
+                final File filesDir = getFilesDir();
+                final String[] names = {"node.log", "boot.log", "crash.log"};
+                int cleared = 0;
+                for (String name : names) {
+                    File f = new File(filesDir, name);
+                    if (f.exists() && f.delete()) {
+                        cleared++;
+                    }
+                }
+                final int count = cleared;
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(MainActivity.this,
+                                "已清空 " + count + " 个日志文件", Toast.LENGTH_SHORT).show();
+                        refreshLog();
+                    }
+                });
+            }
+        });
     }
 
     // 仅用于 toggle 判断当前是否处于运行态（来自广播）。

@@ -331,9 +331,14 @@ function createApp(opts, state) {
       node: process.version,
       dataDir: state.dataDir,
       dataDirSource: state.dataDirSource,
-      mdns: state.discovery && state.discovery.available
-        ? { available: true, registered: state.discovery.registered }
-        : { available: false, error: state.discovery ? state.discovery.error : '' },
+      // 安卓 App 侧默认传 --no-mdns：mDNS 由 Java 侧 MdnsAdvertiser/MdnsDiscovery
+      // （Android 系统 NSD）负责宣告与发现。此时 state.discovery 不存在，不能误报
+      // 「不可用」——否则管理页会显示「mDNS 不可用：未知」，但实际节点能被发现。
+      mdns: state.discovery
+        ? (state.discovery.available
+            ? { available: true, registered: state.discovery.registered }
+            : { available: false, error: state.discovery.error })
+        : { available: true, note: 'Android NSD（系统服务发现）' },
       databases: state.store.stats(),
     });
   });
