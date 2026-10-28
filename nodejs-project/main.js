@@ -1026,6 +1026,12 @@ function peerRequest(peer, urlPath, opts) {
         resolve({ status: res.statusCode, json, text });
       });
     });
+    // 对端不可达时不能无限挂起：管理页每 10s 轮询 /sync/status，
+    // 若配对的离线对端请求不超时，会累积大量挂起连接耗尽 fd/内存，
+    // 最终导致 Node 事件循环卡死、心跳过期被 Watchdog 杀掉。
+    req.setTimeout(3000, () => {
+      req.destroy(new Error('timeout'));
+    });
     req.on('error', reject);
     if (body) req.write(body);
     req.end();
@@ -1361,7 +1367,11 @@ async function start(opts) {
   const writeHeartbeat = function () {
     try {
       fs.writeFileSync(path.join(dataDir, 'heartbeat'), String(Date.now()));
-    } catch (e) { /* 心跳写失败不影响服务 */ }
+    } catch (e) {
+      // 心跳写失败往往预示磁盘/权限问题，必须留下痕迹，否则 Watchdog 只看到
+      // 「心跳过期」却不知道根因。
+      console.error('[heartbeat] 写入失败: ' + (e && e.message ? e.message : e));
+    }
   };
   writeHeartbeat();
   state.heartbeatTimer = setInterval(writeHeartbeat, 10000);
