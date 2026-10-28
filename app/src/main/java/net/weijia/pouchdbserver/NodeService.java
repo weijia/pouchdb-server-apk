@@ -57,7 +57,10 @@ public class NodeService extends Service {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private MdnsAdvertiser advertiser;
-    private final Prefs prefs = new Prefs(this);
+    // 注意：Prefs 内部会调 context.getApplicationContext()，而字段初始化器在 Service
+    // 构造阶段（<init>）执行，此时 Context 尚未附着、getApplicationContext() 返回 null，
+    // 会在 onCreate 之前就抛 NPE。必须延迟到 onCreate 里初始化。
+    private Prefs prefs;
 
     // 部分 WakeLock：防止系统在屏幕熄灭后让 CPU 睡死、把 Node 线程冻结。
     // 注意：这只是保活的手段之一，最关键是电池优化豁免（Manifest + MainActivity 引导）。
@@ -109,6 +112,8 @@ public class NodeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        // Context 在 onCreate 后才附着，Prefs 必须在这里初始化（不能放在字段初始化器）。
+        prefs = new Prefs(this);
         try {
             bootLog("onCreate: process=:node");
             createChannel();

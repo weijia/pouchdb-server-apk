@@ -32,7 +32,12 @@ public final class Prefs {
     private final SharedPreferences sp;
 
     public Prefs(Context context) {
-        sp = context.getApplicationContext().getSharedPreferences(NAME, Context.MODE_PRIVATE);
+        // getApplicationContext() 在 Service 构造阶段(<init>)会返回 null，这里做一次兜底：
+        // 取不到 application context 时直接用传入的 context（Service/Activity 上下文本身
+        // 就能 getSharedPreferences，无需非 application context 不可）。
+        Context app = context.getApplicationContext();
+        Context ctx = app != null ? app : context;
+        sp = ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE);
     }
 
     public int getPort() {
