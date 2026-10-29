@@ -20,6 +20,9 @@ const PENDING_CAP = 20;          // pending 总数上限（防刷）
 const RATE_WINDOW_MS = 60 * 1000; // 同 deviceId / IP 速率窗口
 const RATE_MAX = 5;              // 窗口内最大请求数
 const STALE_MS = 60 * 60 * 1000; // pending 陈旧阈值（1h）
+// 已批准/已拒绝条目的保留时长：够请求方轮询 /_pair/status 取凭据即可，
+// 过期即删，避免长期占用 PENDING_CAP。
+const HANDLED_KEEP_MS = 5 * 60 * 1000;
 
 // 注册相关限制
 const REGISTER_RATE_MAX = 10;      // 同一 IP 每窗口最多提交注册数
@@ -259,7 +262,12 @@ class UserStore {
     const now = Date.now();
     let changed = false;
     Object.keys(this.pending).forEach((token) => {
-      if (now - this.pending[token].createdAt > STALE_MS) {
+      const p = this.pending[token];
+      // 已批准/已拒绝的条目只需保留一小段时间，供请求方轮询 /_pair/status 取凭据；
+      // 之后必须清掉，否则会一直占着 PENDING_CAP（20 条），新配对请求会被 429 拒绝。
+      const handled = p.state && p.state !== 'pending';
+      const ttl = handled ? HANDLED_KEEP_MS : STALE_MS;
+      if (now - p.createdAt > ttl) {
         delete this.pending[token];
         changed = true;
       }
@@ -292,16 +300,26 @@ class UserStore {
     return { token };
   }
 
+  // 仅列出「待审批」的配对请求：
+  // - 过滤 state !== 'pending'：批准/拒绝后的条目只是留给请求方轮询取凭据，
+  //   不应再出现在待审列表（否则 App 点「允许」后该行不会消失，看起来像没反应）；
+  // - 过滤 type === 'register'：注册申请走 /register/requests，避免混进配对列表。
   getPendingList() {
-    return Object.keys(this.pending).map((token) => ({
-      token,
-      type: this.pending[token].type || 'pair',
-      deviceId: this.pending[token].deviceId,
-      name: this.pending[token].name,
-      username: this.pending[token].username,
-      state: this.pending[token].state,
-      createdAt: this.pending[token].createdAt,
-    }));
+    this.pruneStale();
+    return Object.keys(this.pending)
+      .filter((token) => this.pending[token]
+        && this.pending[token].state === 'pending'
+        && this.pending[token].type !== 'register')
+      .map((token) => ({
+        token,
+        type: this.pending[token].type || 'pair',
+        deviceId: this.pending[token].deviceId,
+        name: this.pending[token].name,
+        username: this.pending[token].username,
+        state: this.pending[token].state,
+        createdAt: this.pending[token].createdAt,
+      }))
+      .sort((a, b) => b.createdAt - a.createdAt);
   }
 
   // 审批：pending -> active peer 账号，pending 标记 approved 并保留凭据供请求方轮询获取。

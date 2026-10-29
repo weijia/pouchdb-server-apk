@@ -803,31 +803,63 @@ public class MainActivity extends Activity {
     /** 拉取本机待审批的配对请求并渲染。 */
     private void pollApprovals() {
         try {
-            String resp = Http.get(controlUrl("/pair/requests"));
-            final JSONArray reqs = new JSONObject(resp).optJSONArray("requests");
+            final String resp = Http.get(controlUrl("/pair/requests"));
+            JSONObject obj = new JSONObject(resp == null ? "{}" : resp.trim());
+            final JSONArray reqs = obj.optJSONArray("requests");
+            final String err = obj.optString("error", "");
+            final String reason = obj.optString("reason", "");
             mainHandler.post(new Runnable() {
                 @Override
                 public void run() {
+                    if (reqs == null) {
+                        // 查询失败时明确显示原因，不要伪装成「无待审批请求」，
+                        // 否则用户会误以为请求没收到。
+                        showApprovalText("查询待审批失败：" + (reason.isEmpty() ? err : reason));
+                        return;
+                    }
                     renderApprovals(reqs);
                 }
             });
         } catch (Throwable t) {
-            // 服务未就绪时静默忽略
+            final String m = t.getMessage();
+            mainHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    showApprovalText("查询待审批失败：" + m);
+                }
+            });
         }
+    }
+
+    private void showApprovalText(String text) {
+        if (approvalContainer == null) return;
+        approvalContainer.removeAllViews();
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setPadding(0, 4, 0, 4);
+        approvalContainer.addView(tv);
     }
 
     private void renderApprovals(JSONArray reqs) {
         if (approvalContainer == null) return;
+        // 只渲染真正待审批（state=pending）的配对请求：批准后 Node 仍会短暂保留条目
+        // 供对方轮询取凭据，若不过滤，点「允许」后该行不会消失，看起来像没反应。
+        java.util.List<JSONObject> pending = new java.util.ArrayList<>();
+        if (reqs != null) {
+            for (int i = 0; i < reqs.length(); i++) {
+                JSONObject r = reqs.optJSONObject(i);
+                if (r == null) continue;
+                String state = r.optString("state", "pending");
+                String type = r.optString("type", "pair");
+                if ("pending".equals(state) && !"register".equals(type)) pending.add(r);
+            }
+        }
         approvalContainer.removeAllViews();
-        if (reqs == null || reqs.length() == 0) {
-            TextView empty = new TextView(this);
-            empty.setText("（无待审批请求）");
-            approvalContainer.addView(empty);
+        if (pending.isEmpty()) {
+            showApprovalText("（无待审批请求）");
             return;
         }
-        for (int i = 0; i < reqs.length(); i++) {
-            final JSONObject r = reqs.optJSONObject(i);
-            if (r == null) continue;
+        for (final JSONObject r : pending) {
             final String token = r.optString("token", "");
             final String name = r.optString("name", "未知设备");
 
@@ -872,11 +904,19 @@ public class MainActivity extends Activity {
             public void run() {
                 try {
                     String body = new JSONObject().put("token", token).toString();
-                    Http.postJson(controlUrl("/pair/approve"), body, null, null);
+                    String resp = Http.postJson(controlUrl("/pair/approve"), body, null, null);
+                    JSONObject r = new JSONObject(resp == null || resp.trim().isEmpty() ? "{}" : resp.trim());
+                    // Http 对 4xx 不抛异常，必须自己检查，否则 token 过期/已处理会伪装成成功。
+                    if (!r.optBoolean("ok", false)) {
+                        String why = r.optString("reason", r.optString("error", "未知原因"));
+                        toast("审批失败: " + why);
+                        pollApprovals();
+                        return;
+                    }
                     // 记录对方为已配对（反向凭据由对方经其轮询 /_pair/status 获取后写入 peer_credentials）。
                     // 以 deviceId 为 key，与 peer 的 key() 一致，UI 才能标记「已配对」。
                     if (!deviceId.isEmpty()) prefs.putPairedDevice(deviceId, name);
-                    toast("已允许 " + name);
+                    toast("已允许 " + name + "，等待对方完成配对");
                     pollApprovals();
                 } catch (Throwable t) {
                     toast("审批失败: " + t.getMessage());

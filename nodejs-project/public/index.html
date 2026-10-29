@@ -258,9 +258,12 @@ async function loadRequests() {
 }
 
 async function approve(token) {
-  try { await api(CTL, '/pair/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) }); }
-  catch (e) { alert(e.message); }
+  let r;
+  try { r = await api(CTL, '/pair/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) }); }
+  catch (e) { alert('允许失败：' + e.message); loadRequests(); return; }
+  alert('已允许（对端账号 ' + (r.user || '') + '）。等待对方轮询取凭据后完成配对。');
   loadRequests();
+  loadPeers();
 }
 
 async function deny(token) {
