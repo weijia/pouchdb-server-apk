@@ -2,6 +2,7 @@ package net.weijia.pouchdbserver;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Build;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -56,9 +57,21 @@ public final class Prefs {
         sp.edit().putInt(KEY_CONTROL_PORT, port).apply();
     }
 
-    /** 设备展示名（mDNS instance 名），可改名。 */
+    /** 设备展示名（mDNS instance 名），缺省用手机型号（如 "Pixel 7"）。 */
     public String getInstance() {
-        return sp.getString(KEY_INSTANCE, "pouchdb-server");
+        String v = sp.getString(KEY_INSTANCE, null);
+        // 历史版本把默认名硬编码成 "pouchdb-server" 并落盘，这里一并视为未设置，
+        // 让老用户升级后也自动改用手机型号。
+        if (v == null || v.trim().isEmpty() || "pouchdb-server".equals(v)) {
+            return defaultInstance();
+        }
+        return v;
+    }
+
+    /** 缺省实例名：手机型号；取不到型号时退回通用名。 */
+    private static String defaultInstance() {
+        String model = Build.MODEL == null ? "" : Build.MODEL.trim();
+        return model.isEmpty() ? "pouchdb-server" : model;
     }
 
     public void setInstance(String instance) {

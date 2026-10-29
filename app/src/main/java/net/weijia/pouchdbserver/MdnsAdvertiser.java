@@ -202,10 +202,33 @@ public final class MdnsAdvertiser {
     }
 
     private static String sanitize(String name) {
-        String safe = name == null ? "pouchdb-server" : name.trim();
+        String safe = name == null ? "" : name.trim();
+        // 只处理会破坏 DNS-SD 名称结构的字符：'.' 是标签分隔符，控制字符直接去掉。
+        // 其余字符（含中文手机型号，如「小米 14」）保留——DNS-SD 名称按 UTF-8 编码，
+        // 系统 NsdManager 支持，替换成 '-' 反而让对端看到一串横线。
+        safe = safe.replace('.', '_').replaceAll("\\p{Cntrl}", "");
         if (safe.isEmpty()) {
             safe = "pouchdb-server";
         }
-        return safe.replaceAll("[^A-Za-z0-9._-]", "-");
+        return truncateUtf8(safe, 63);
+    }
+
+    /** DNS-SD 单个标签上限 63 字节；按 UTF-8 字节长度安全截断（不切断多字节字符）。 */
+    private static String truncateUtf8(String s, int maxBytes) {
+        if (s.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= maxBytes) {
+            return s;
+        }
+        StringBuilder sb = new StringBuilder();
+        int bytes = 0;
+        for (int i = 0; i < s.length(); ) {
+            int cp = s.codePointAt(i);
+            int len = new String(Character.toChars(cp))
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes + len > maxBytes) break;
+            sb.appendCodePoint(cp);
+            bytes += len;
+            i += Character.charCount(cp);
+        }
+        return sb.toString();
     }
 }
