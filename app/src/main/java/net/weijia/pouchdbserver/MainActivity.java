@@ -583,6 +583,17 @@ public class MainActivity extends Activity {
                         }
                     });
                 }
+            }, new MdnsDiscovery.LogSink() {
+                @Override
+                public void log(final String msg) {
+                    // 发现的每一步都留痕：否则「注册成功但一台都没发现」只能靠猜
+                    reportExecutor.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            bootLog(msg);
+                        }
+                    });
+                }
             });
         }
         mdns.start(NetUtils.getLanIp(this), prefs.getPort());

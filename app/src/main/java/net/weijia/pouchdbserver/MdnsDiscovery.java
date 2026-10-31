@@ -9,20 +9,26 @@ import android.os.Looper;
 import android.util.Log;
 
 import java.net.InetAddress;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 局域网服务发现（Android NSD）。
  *
- * 仅做「发现」，不复用 MdnsAdvertiser 的宣告逻辑：监听 _couchdb._tcp，
- * 解析出每个对端的 host/IP、port、TXT（device_id / instance / version / http_port）。
+ * 监听 _couchdb._tcp，解析出每个对端的 host/IP、port、TXT（device_id / instance / version）。
  * 排除本机自身，并通过回调把当前 peer 列表推给 UI。
  *
- * 设计参考 go-stock-server 的 discovery（同服务类型、同 TXT 字段），但 Android 上
- * 必须用 NsdManager（5353 被系统占用、且需 MulticastLock）。
+ * 两个必须遵守的约束（都踩过）：
+ *  1) NsdManager 同一时间只能有一个 resolve 在进行，并发调用会失败或回调错乱，
+ *     因此这里用队列串行解析 + 失败重试 + 超时兜底。
+ *  2) getServiceType() 在不同 ROM 上可能是 "_couchdb._tcp" / "_couchdb._tcp." /
+ *     带域名后缀，用 equals 精确比较会把所有结果丢掉（且完全静默）——改用前缀匹配。
  */
 public final class MdnsDiscovery {
 
@@ -30,8 +36,19 @@ public final class MdnsDiscovery {
     private static final String TAG = "MdnsDiscovery";
     private static final long RESCAN_INTERVAL_MS = 60_000;
 
+    // 解析串行化参数：间隔太短在部分 ROM 上会 FAILURE_ALREADY_ACTIVE
+    private static final long RESOLVE_GAP_MS = 400;
+    private static final long RESOLVE_RETRY_DELAY_MS = 1_200;
+    private static final int RESOLVE_RETRY_MAX = 2;
+    private static final long RESOLVE_TIMEOUT_MS = 5_000;
+
     public interface Callback {
         void onPeers(List<Peer> peers);
+    }
+
+    /** 诊断日志出口（接到 boot.log，App 日志页可见）。 */
+    public interface LogSink {
+        void log(String msg);
     }
 
     /** 发现到的对端实例。 */
@@ -62,11 +79,20 @@ public final class MdnsDiscovery {
 
     private final Context appContext;
     private final Callback callback;
+    private final LogSink logSink;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ConcurrentHashMap<String, Peer> peers = new ConcurrentHashMap<>();
     private NsdManager nsdManager;
     private NsdManager.DiscoveryListener discoveryListener;
     private WifiManager.MulticastLock multicastLock;
+
+    // 解析队列（串行化，规避 NsdManager 并发限制）
+    private final ArrayDeque<NsdServiceInfo> resolveQueue = new ArrayDeque<>();
+    private final Set<String> queuedNames = new HashSet<>();
+    private final HashMap<String, Integer> resolveAttempts = new HashMap<>();
+    private boolean resolveInFlight;
+    private String resolveCurrent = "";
+
     private final Runnable rescan = new Runnable() {
         @Override
         public void run() {
@@ -82,9 +108,24 @@ public final class MdnsDiscovery {
     private boolean started;
 
     public MdnsDiscovery(Context context, Callback callback) {
+        this(context, callback, null);
+    }
+
+    public MdnsDiscovery(Context context, Callback callback, LogSink logSink) {
         this.appContext = context.getApplicationContext();
         this.callback = callback;
+        this.logSink = logSink;
         this.nsdManager = (NsdManager) appContext.getSystemService(Context.NSD_SERVICE);
+    }
+
+    private void log(String msg) {
+        Log.i(TAG, msg);
+        if (logSink != null) {
+            try {
+                logSink.log("mDNS " + msg);
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     public synchronized void start(String localIp, int localDataPort) {
@@ -103,6 +144,7 @@ public final class MdnsDiscovery {
         handler.removeCallbacks(rescan);
         stopDiscovery();
         releaseMulticastLock();
+        clearResolveState();
         peers.clear();
         notifyPeers();
     }
@@ -120,68 +162,184 @@ public final class MdnsDiscovery {
 
     private void beginDiscovery() {
         if (nsdManager == null) {
-            Log.w(TAG, "NsdManager 不可用");
+            log("发现不可用: NsdManager 为空");
             return;
         }
         discoveryListener = new NsdManager.DiscoveryListener() {
             @Override
             public void onDiscoveryStarted(String regType) {
-                Log.i(TAG, "发现已启动: " + regType);
+                log("发现已启动: " + regType);
             }
 
             @Override
             public void onStartDiscoveryFailed(String serviceType, int errorCode) {
-                Log.w(TAG, "启动发现失败 code=" + errorCode);
+                log("启动发现失败 code=" + errorCode);
             }
 
             @Override
             public void onStopDiscoveryFailed(String serviceType, int errorCode) {
-                Log.w(TAG, "停止发现失败 code=" + errorCode);
+                log("停止发现失败 code=" + errorCode);
             }
 
             @Override
             public void onServiceFound(NsdServiceInfo serviceInfo) {
-                // 只关注 _couchdb._tcp
-                if (!SERVICE_TYPE.equals(serviceInfo.getServiceType())) return;
-                nsdManager.resolveService(serviceInfo, resolveListener);
+                String type = serviceInfo.getServiceType();
+                // 不用 equals：部分 ROM 会带尾点或域名后缀，精确比较会静默丢掉全部结果
+                if (type == null || !type.startsWith(SERVICE_TYPE)) {
+                    log("忽略非目标服务: " + serviceInfo.getServiceName() + " type=" + type);
+                    return;
+                }
+                log("发现服务: " + serviceInfo.getServiceName() + " type=" + type);
+                enqueueResolve(serviceInfo);
             }
 
             @Override
             public void onServiceLost(NsdServiceInfo serviceInfo) {
                 // 无法仅凭 serviceInfo 精确定位 key（解析后才知 device_id），
                 // 直接全量重扫刷新。
-                Log.i(TAG, "服务丢失: " + serviceInfo.getServiceName());
+                log("服务丢失: " + serviceInfo.getServiceName());
                 restart();
             }
 
             @Override
             public void onDiscoveryStopped(String serviceType) {
-                Log.i(TAG, "发现已停止");
+                log("发现已停止");
             }
         };
         try {
             nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener);
         } catch (Exception e) {
-            Log.w(TAG, "discoverServices 异常: " + e.getMessage());
+            log("discoverServices 异常: " + e.getMessage());
+        }
+    }
+
+    // ==================== 串行解析（NsdManager 一次只能 resolve 一个） ====================
+
+    private void enqueueResolve(NsdServiceInfo info) {
+        String name = info.getServiceName();
+        if (name == null || name.isEmpty()) return;
+        synchronized (this) {
+            if (!started || queuedNames.contains(name)) return;
+            queuedNames.add(name);
+            resolveQueue.addLast(info);
+        }
+        pumpResolve();
+    }
+
+    private void pumpResolve() {
+        final NsdServiceInfo next;
+        synchronized (this) {
+            if (resolveInFlight || !started || resolveQueue.isEmpty()) return;
+            next = resolveQueue.pollFirst();
+            if (next == null) return;
+            resolveInFlight = true;
+            resolveCurrent = next.getServiceName();
+        }
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (!started || nsdManager == null) {
+                        finishResolve(next, false);
+                        return;
+                    }
+                    nsdManager.resolveService(next, resolveListener);
+                    scheduleResolveTimeout(next.getServiceName());
+                } catch (Throwable t) {
+                    log("解析调用异常: " + t.getMessage());
+                    finishResolve(next, true);
+                }
+            }
+        }, RESOLVE_GAP_MS);
+    }
+
+    /** 回调丢失兜底：NsdManager 偶尔不回调，不兜底会永久卡住解析队列。 */
+    private void scheduleResolveTimeout(final String name) {
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                synchronized (MdnsDiscovery.this) {
+                    if (!resolveInFlight || !name.equals(resolveCurrent)) return;
+                    resolveInFlight = false;
+                    resolveCurrent = "";
+                    queuedNames.remove(name);
+                }
+                log("解析超时: " + name);
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        pumpResolve();
+                    }
+                }, RESOLVE_GAP_MS);
+            }
+        }, RESOLVE_TIMEOUT_MS);
+    }
+
+    private void finishResolve(NsdServiceInfo info, boolean failed) {
+        String name = info != null ? info.getServiceName() : "";
+        synchronized (this) {
+            if (name.equals(resolveCurrent)) {
+                resolveInFlight = false;
+                resolveCurrent = "";
+            }
+            queuedNames.remove(name);
+        }
+        if (failed && info != null) {
+            int attempt = resolveAttempts.containsKey(name) ? resolveAttempts.get(name) : 0;
+            if (attempt < RESOLVE_RETRY_MAX) {
+                resolveAttempts.put(name, attempt + 1);
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        enqueueResolve(info);
+                    }
+                }, RESOLVE_RETRY_DELAY_MS);
+            } else {
+                resolveAttempts.remove(name);
+            }
+        } else if (info != null) {
+            resolveAttempts.remove(name);
+        }
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                pumpResolve();
+            }
+        }, RESOLVE_GAP_MS);
+    }
+
+    private void clearResolveState() {
+        synchronized (this) {
+            resolveQueue.clear();
+            queuedNames.clear();
+            resolveAttempts.clear();
+            resolveInFlight = false;
+            resolveCurrent = "";
         }
     }
 
     private final NsdManager.ResolveListener resolveListener = new NsdManager.ResolveListener() {
         @Override
         public void onResolveFailed(NsdServiceInfo serviceInfo, int errorCode) {
-            Log.w(TAG, "解析失败 code=" + errorCode);
+            log("解析失败 code=" + errorCode + " name="
+                    + (serviceInfo != null ? serviceInfo.getServiceName() : "?"));
+            finishResolve(serviceInfo, true);
         }
 
         @Override
         public void onServiceResolved(NsdServiceInfo info) {
+            finishResolve(info, false);
             InetAddress host = info.getHost();
             String ip = host != null ? host.getHostAddress() : "";
             int port = info.getPort();
-            if (ip.isEmpty() || port <= 0) return;
+            if (ip.isEmpty() || port <= 0) {
+                log("解析结果无效: ip=" + ip + " port=" + port);
+                return;
+            }
 
             // 排除自身：IP 与数据端口都一致
             if (ip.equals(localIp) && port == localDataPort) {
-                Log.i(TAG, "跳过自身: " + ip + ":" + port);
+                log("跳过自身: " + ip + ":" + port);
                 return;
             }
 
@@ -191,7 +349,7 @@ public final class MdnsDiscovery {
             String version = attr(info, "version");
             Peer peer = new Peer(deviceId, instance, ip, port, version);
             peers.put(peer.key(), peer);
-            Log.i(TAG, "发现对端: " + peer);
+            log("发现对端: " + peer);
             notifyPeers();
         }
     };
@@ -235,9 +393,10 @@ public final class MdnsDiscovery {
                 multicastLock = wifi.createMulticastLock("pouchdb-discovery");
                 multicastLock.setReferenceCounted(false);
                 multicastLock.acquire();
+                log("组播锁已获取");
             }
         } catch (Exception e) {
-            Log.w(TAG, "获取组播锁失败: " + e.getMessage());
+            log("获取组播锁失败: " + e.getMessage());
         }
     }
 
