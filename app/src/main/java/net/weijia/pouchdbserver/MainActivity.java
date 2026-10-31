@@ -458,6 +458,18 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    /** 写 boot.log（与 NodeService 同一格式），用于界面侧需要留痕的诊断信息。 */
+    private void bootLog(String msg) {
+        try {
+            java.io.FileWriter w = new java.io.FileWriter(new java.io.File(getFilesDir(), "boot.log"), true);
+            w.write(new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(new java.util.Date())
+                    + " " + msg + "\n");
+            w.flush();
+            w.close();
+        } catch (Throwable ignored) {
+        }
+    }
+
     /**
      * 动态注册状态广播（Android 14+ 必须显式 RECEIVER_NOT_EXPORTED，否则崩溃）。
      */
@@ -526,6 +538,8 @@ public class MainActivity extends Activity {
                         Http.postJson(controlUrl("/peers/report"), body, null, null);
                     } catch (Throwable t) {
                         Log.w(TAG, "上报发现结果失败: " + t.getMessage());
+                        // 失败要留痕：否则又是一次「静默没上报」，用户只能看到管理页空列表。
+                        bootLog("上报发现结果失败: " + t.getMessage());
                     }
                 }
             });
