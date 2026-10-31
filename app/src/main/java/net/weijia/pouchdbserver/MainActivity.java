@@ -86,6 +86,10 @@ public class MainActivity extends Activity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final java.util.concurrent.ExecutorService executor =
             java.util.concurrent.Executors.newSingleThreadExecutor();
+    // 上报发现结果单独一条线程：executor 可能被配对（最长 60s 轮询）或同步占住，
+    // 上报排在其后会导致管理页迟迟看不到设备。
+    private final java.util.concurrent.ExecutorService reportExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
     private boolean browserVisible = true;
     private boolean serverUp;
     private boolean webViewLoaded;
@@ -447,6 +451,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         alive.set(false);
         scheduler.shutdownNow();
+        reportExecutor.shutdownNow();
         if (webView != null) {
             webView.destroy();
         }
@@ -500,8 +505,8 @@ public class MainActivity extends Activity {
 
     /** 把 Java mDNS 发现到的对端列表上报给 Node，供 admin 管理页 /peers 展示。 */
     private void reportDiscoveredPeers(List<MdnsDiscovery.Peer> peers) {
+        final JSONArray devices = new JSONArray();
         try {
-            JSONArray devices = new JSONArray();
             for (MdnsDiscovery.Peer p : peers) {
                 devices.put(new JSONObject()
                         .put("deviceId", p.deviceId == null ? "" : p.deviceId)
@@ -510,10 +515,22 @@ public class MainActivity extends Activity {
                         .put("port", p.port)
                         .put("scheme", "http"));
             }
-            JSONObject body = new JSONObject().put("devices", devices);
-            Http.postJson(controlUrl("/peers/report"), body.toString(), null, null);
+            final String body = new JSONObject().put("devices", devices).toString();
+            // 关键：本方法由 MdnsDiscovery 的主线程 Handler 回调，而 Http 是同步阻塞实现。
+            // 在主线程发请求会抛 NetworkOnMainThreadException，被 catch 吞掉后
+            // /peers/report 实际从未发出 —— 现象是「App 列表能看到设备，管理页一台都没有」。
+            reportExecutor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Http.postJson(controlUrl("/peers/report"), body, null, null);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "上报发现结果失败: " + t.getMessage());
+                    }
+                }
+            });
         } catch (Throwable t) {
-            // 上报失败不影响 App 自身发现/配对。
+            Log.w(TAG, "构造发现结果失败: " + t.getMessage());
         }
     }
 
