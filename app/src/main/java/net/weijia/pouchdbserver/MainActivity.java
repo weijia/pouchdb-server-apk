@@ -555,6 +555,9 @@ public class MainActivity extends Activity {
             });
         }
         mdns.start(NetUtils.getLanIp(this), prefs.getPort());
+        // 立即上报一次（通常为空）：让 admin 管理页能区分「手机还没上报」和
+        // 「上报了但确实没发现设备」，否则 /peers 里 androidReportedAt 一直是 0。
+        reportDiscoveredPeers(new ArrayList<MdnsDiscovery.Peer>());
     }
 
     private void stopDiscovery() {
@@ -619,6 +622,11 @@ public class MainActivity extends Activity {
                     String body = new JSONObject()
                             .put("device_id", prefs.getDeviceId())
                             .put("name", prefs.getInstance())
+                            // 带上本机数据端口：对方批准后才知道怎么回连本机，
+                            // 否则对方管理页的「已配对」里看不到这台手机。
+                            .put("host", NetUtils.getLanIp(MainActivity.this))
+                            .put("port", prefs.getPort())
+                            .put("scheme", "http")
                             .toString();
                     String resp = Http.postJson(
                             "http://" + peer.host + ":" + peer.port + "/_pair/request", body, null, null);

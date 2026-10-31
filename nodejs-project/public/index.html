@@ -314,16 +314,24 @@ async function loadPeers() {
   const offline = (data.paired || []).filter((p) => !p.online);
   const all = discovered.concat(offline);
   if (!all.length) {
+    // androidReportedAt 为 0 说明手机侧根本没上报（发现没启动/服务未运行），
+    // 而不是「发现到了但一台都没有」——这两种情况排查方向完全不同。
+    const at = data.androidReportedAt || 0;
+    const fresh = at
+      ? '手机发现结果：' + Math.max(0, Math.round((Date.now() - at) / 1000)) + ' 秒前上报，0 台'
+      : '手机尚未上报发现结果（服务未运行或发现未启动）';
     el('peers').innerHTML = '<div class="empty">' + (data.available
-      ? '未发现其他实例（手机上需启动服务）' : 'mDNS 不可用：' + (data.error || '')) + '</div>';
+      ? '未发现其他实例（' + fresh + '）' : 'mDNS 不可用：' + (data.error || '')) + '</div>';
     return;
   }
   el('peers').innerHTML = '<table><tr><th>实例</th><th>地址</th><th>设备 ID</th><th>状态</th><th>操作</th></tr>' +
     all.map((p) => '<tr><td>' + (p.instance || '-') + '</td><td>' + p.host + ':' + p.port + ' (' + (p.scheme || 'http') + ')</td><td>' +
       (p.deviceId || '-') + '</td><td>' + (p.paired ? '<span class="pill on">已配对</span>' : '<span class="pill">未配对</span>')
+      + (p.paired && p.hasCredential === false ? ' <span class="pill">仅对方可访问</span>' : '')
       + (p.online === false ? ' <span class="pill off">离线</span>' : '') + '</td><td>' +
-      (p.paired ? '<button onclick="selectPeer(\'' + (p.deviceId || (p.host + ':' + p.port)) + '\')">同步</button>'
-                : '<button class="primary" onclick="pairPeer(\'' + p.host + '\',' + p.port + ',\'' + (p.deviceId || '') + '\',\'' + (p.instance || '') + '\')">配对</button>')
+      (p.paired && p.hasCredential !== false
+        ? '<button onclick="selectPeer(\'' + (p.deviceId || (p.host + ':' + p.port)) + '\')">同步</button>'
+        : '<button class="primary" onclick="pairPeer(\'' + p.host + '\',' + p.port + ',\'' + (p.deviceId || '') + '\',\'' + (p.instance || '') + '\')">配对</button>')
       + '</td></tr>').join('') + '</table>';
 }
 

@@ -368,7 +368,15 @@ function createApp(opts, state) {
     }
     const deviceId = (req.body && req.body.device_id) || '';
     const name = (req.body && req.body.name) || '';
-    const r = state.userStore.addPending(deviceId, name);
+    // 请求方带上自己的数据端口（port），本机批准后才知道对方地址；host 缺省用来源 IP。
+    const reqPort = Number(req.body && req.body.port) || 0;
+    const reqHost = (req.body && req.body.host)
+      || ((req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
+    const r = state.userStore.addPending(deviceId, name, {
+      host: reqHost,
+      port: reqPort,
+      scheme: (req.body && req.body.scheme) || 'http',
+    });
     if (r.error) {
       res.status(429).json({ error: r.error, reason: 'too many pending requests' });
       return;
@@ -611,6 +619,25 @@ function createControlApp(opts, state) {
       return;
     }
     console.log('[pair] 已批准配对 token=' + token + ' user=' + r.user);
+    // 本机是「被请求方」：请求里带了对方数据端口时，把对方记入 peers.json。
+    // 否则批准后本机只多了一个账号，却不知道对方地址 —— 管理页「已配对」列表为空、
+    // 也无法主动向对方发起同步。
+    if (r.type === 'pair' && r.host && r.port) {
+      const key = peerKeyOf(r.deviceId, r.host, r.port);
+      // 注意：不写入凭据。这次配对发放的账号是「对方访问本机」用的，
+      // 本机要主动同步到对方，需要另行发起一次反向配对（对方审批）拿到对端账号。
+      state.peerStore.peers[key] = {
+        deviceId: r.deviceId || '',
+        instance: r.name || (r.host + ':' + r.port),
+        host: r.host,
+        port: Number(r.port),
+        scheme: r.scheme || 'http',
+        direction: 'inbound',
+        pairedAt: Date.now(),
+      };
+      savePeers(state.peerStore);
+      console.log('[pair] 已登记对端 ' + key + ' -> ' + r.host + ':' + r.port + '（对方可访问本机）');
+    }
     res.json({ ok: true, user: r.user, pass: r.pass });
   });
 
@@ -673,9 +700,15 @@ function createControlApp(opts, state) {
         || (state.androidPeers || []).length > 0,
       error: state.discovery ? state.discovery.error : '',
       androidReportedAt: state.androidPeersAt || 0,
-      peers: discovered.map((p) => Object.assign({}, p, {
-        paired: !!paired[p.deviceId] || !!paired[p.host + ':' + p.port],
-      })),
+      peers: discovered.map((p) => {
+        const entry = paired[p.deviceId] || paired[p.host + ':' + p.port];
+        return Object.assign({}, p, {
+          paired: !!entry,
+          // 只「被对方配对」（本机批准）的对端没有对端账号，不能主动同步。
+          hasCredential: !!(entry && entry.user && entry.pass),
+          direction: entry ? (entry.direction || 'outbound') : '',
+        });
+      }),
       // 已配对但当前不在网的对端也列出来，方便直接同步
       paired: Object.keys(paired).map((key) => ({
         key,
@@ -685,6 +718,8 @@ function createControlApp(opts, state) {
         port: paired[key].port,
         scheme: paired[key].scheme || 'http',
         paired: true,
+        hasCredential: !!(paired[key].user && paired[key].pass),
+        direction: paired[key].direction || 'outbound',
         online: discovered.some((p) => p.deviceId === key || (p.host + ':' + p.port) === key),
       })),
     });
@@ -745,7 +780,14 @@ function createControlApp(opts, state) {
     try {
       const r = await peerRequest(target, '/_pair/request', {
         method: 'POST',
-        body: { device_id: state.deviceId, name: state.instance },
+        body: {
+          device_id: state.deviceId,
+          name: state.instance,
+          // 带上本机数据端口：对方批准后才知道怎么回连本机（否则对方管理页看不到本机）。
+          host: getLanIpv4(),
+          port: state.port,
+          scheme: 'http',
+        },
       });
       const token = r.json && r.json.token;
       if (!token) {

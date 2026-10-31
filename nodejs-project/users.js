@@ -276,7 +276,9 @@ class UserStore {
   }
 
   // 创建配对待审。返回 { token } 或 { error:'too_many'|'rate_limited' }
-  addPending(deviceId, name) {
+  // extra = { host, port, scheme }：请求方自己的数据端口。批准后本机据此把对方
+  // 记入 peers.json，否则「本机同意配对」的一方永远不知道对方地址，管理页看不到已配对服务器。
+  addPending(deviceId, name, extra) {
     this.pruneStale();
     if (Object.keys(this.pending).length >= PENDING_CAP) {
       return { error: 'too_many' };
@@ -284,6 +286,7 @@ class UserStore {
     if (this._rateLimited(deviceId)) {
       return { error: 'rate_limited' };
     }
+    const ex = extra || {};
     const token = crypto.randomBytes(16).toString('hex');
     const username = 'peer-' + crypto.randomBytes(4).toString('hex');
     const pass = crypto.randomBytes(12).toString('base64').replace(/[^A-Za-z0-9]/g, '');
@@ -291,6 +294,9 @@ class UserStore {
       type: 'pair',
       deviceId: deviceId || '',
       name: name || '',
+      host: ex.host || '',
+      port: Number(ex.port) || 0,
+      scheme: ex.scheme || 'http',
       username,
       pass,
       state: 'pending',
@@ -348,7 +354,18 @@ class UserStore {
     if (isRegister) delete p.passHash;
     this.save();
     if (isRegister) return { user: p.username };
-    return { user: p.username, pass: p.pass };
+    // 连带返回请求方地址：本机（被请求方）批准后据此登记到 peers.json，
+    // 否则「同意配对」的一方没有对方地址，管理页/同步页看不到这台服务器。
+    return {
+      user: p.username,
+      pass: p.pass,
+      deviceId: p.deviceId || '',
+      name: p.name || '',
+      host: p.host || '',
+      port: p.port || 0,
+      scheme: p.scheme || 'http',
+      type: 'pair',
+    };
   }
 
   // 拒绝：配对类直接删除；注册类标记 denied，让注册者轮询能拿到明确结果（随后陈旧清理）。
