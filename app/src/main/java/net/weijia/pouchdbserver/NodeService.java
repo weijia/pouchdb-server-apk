@@ -8,6 +8,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -57,6 +59,7 @@ public class NodeService extends Service {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private MdnsAdvertiser advertiser;
+    private ConnectivityManager.NetworkCallback networkCallback;
     // 注意：Prefs 内部会调 context.getApplicationContext()，而字段初始化器在 Service
     // 构造阶段（<init>）执行，此时 Context 尚未附着、getApplicationContext() 返回 null，
     // 会在 onCreate 之前就抛 NPE。必须延迟到 onCreate 里初始化。
@@ -173,6 +176,8 @@ public class NodeService extends Service {
     public void onDestroy() {
         nodeStarted = false;
         mainHandler.removeCallbacks(watchdog);
+        mainHandler.removeCallbacks(networkRefresh);
+        unregisterNetworkCallback();
         NodeBridge.clearNodeExitListener();
         releaseWakeLock();
         executor.shutdownNow();
@@ -356,10 +361,67 @@ public class NodeService extends Service {
                     }
                 });
             }
-            advertiser.start(prefs.getInstance(), Prefs.DEFAULT_PORT, prefs.getDeviceId());
+            advertiser.start(prefs.getInstance(), Prefs.DEFAULT_PORT, prefs.getDeviceId(),
+                    NetUtils.getLanIp(this));
+            registerNetworkCallback();
         } catch (Throwable t) {
             bootLog("MdnsAdvertiser 启动失败（不影响数据服务）: " + t.getMessage());
         }
+    }
+
+    // ==================== 网络变化 ====================
+
+    /** 网络变化的延迟刷新：换 WiFi 后系统会先 onLost 再 onAvailable，去抖后统一处理。 */
+    private final Runnable networkRefresh = new Runnable() {
+        @Override
+        public void run() {
+            if (advertiser == null) return;
+            String ip = NetUtils.getLanIp(NodeService.this);
+            bootLog("网络变化，刷新 mDNS 宣告 IP=" + (ip.isEmpty() ? "未知" : ip));
+            advertiser.updateLocalIp(ip);
+        }
+    };
+
+    /**
+     * 监听默认网络切换。NsdManager 不会把已注册的 mDNS 记录迁移到新 IP，
+     * 手机换 WiFi / DHCP 续约后局域网里会一直指向旧地址，必须重新宣告。
+     */
+    private void registerNetworkCallback() {
+        if (networkCallback != null) return;
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return;
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    scheduleNetworkRefresh();
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    scheduleNetworkRefresh();
+                }
+            };
+            cm.registerDefaultNetworkCallback(networkCallback);
+            bootLog("已监听网络变化（IP 变化后自动重新宣告 mDNS）");
+        } catch (Throwable t) {
+            bootLog("注册网络回调失败（忽略）: " + t.getMessage());
+        }
+    }
+
+    private void scheduleNetworkRefresh() {
+        mainHandler.removeCallbacks(networkRefresh);
+        mainHandler.postDelayed(networkRefresh, 2000);
+    }
+
+    private void unregisterNetworkCallback() {
+        if (networkCallback == null) return;
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm != null) cm.unregisterNetworkCallback(networkCallback);
+        } catch (Throwable ignored) {
+        }
+        networkCallback = null;
     }
 
     // ==================== 就绪探测 / 日志 ====================

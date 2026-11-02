@@ -44,6 +44,8 @@ public final class MdnsAdvertiser {
     private String instanceName;
     private int port;
     private String deviceId = "";
+    private String localIp = "";       // 期望的宣告地址（网络变化时更新）
+    private String registeredIp = "";  // 当前注册实际使用的地址
     private boolean registered;
     private boolean started;
     private int retryCount;
@@ -54,7 +56,7 @@ public final class MdnsAdvertiser {
         this.nsdManager = (NsdManager) appContext.getSystemService(Context.NSD_SERVICE);
     }
 
-    public synchronized void start(String name, int httpPort, String deviceId) {
+    public synchronized void start(String name, int httpPort, String deviceId, String localIp) {
         if (started) {
             stop();
         }
@@ -62,11 +64,31 @@ public final class MdnsAdvertiser {
         instanceName = sanitize(name);
         port = httpPort;
         this.deviceId = deviceId != null ? deviceId : "";
+        this.localIp = localIp != null ? localIp : "";
         retryCount = 0;
         acquireMulticastLock();
         register();
         handler.removeCallbacks(selfHeal);
         handler.postDelayed(selfHeal, SELF_HEAL_INTERVAL_MS);
+    }
+
+    /**
+     * 网络变化（换 WiFi / DHCP 续约 / 断网重连）后调用。
+     *
+     * NsdManager 不会把已注册的 mDNS 记录迁移到新 IP，手机换 IP 后局域网里仍会
+     * 看到指向旧地址的记录；必须显式注销再注册，并把新 IP 作为 host 绑定。
+     */
+    public synchronized void updateLocalIp(String ip) {
+        String next = ip != null ? ip : "";
+        if (next.equals(localIp) && registered) {
+            return;
+        }
+        localIp = next;
+        if (started) {
+            notifyState("ip-changed", "局域网 IP 变为 " + (next.isEmpty() ? "未知" : next) + "，重新宣告");
+            unregister();
+            register();
+        }
     }
 
     public synchronized void stop() {
@@ -98,6 +120,15 @@ public final class MdnsAdvertiser {
         info.setServiceName(instanceName);
         info.setServiceType(SERVICE_TYPE);
         info.setPort(port);
+        // 显式绑定地址：不指定时由 NsdManager 在注册瞬间自行选择，换网后不会迁移。
+        final String bindIp = localIp;
+        if (!bindIp.isEmpty()) {
+            try {
+                info.setHost(java.net.InetAddress.getByName(bindIp));
+            } catch (Exception e) {
+                Log.w(TAG, "设置 host 失败(" + bindIp + "): " + e.getMessage());
+            }
+        }
         info.setAttribute("service", "pouchdb-server");
         info.setAttribute("version", "1.0");
         info.setAttribute("http_port", String.valueOf(port));
@@ -130,7 +161,9 @@ public final class MdnsAdvertiser {
             @Override
             public void onServiceRegistered(NsdServiceInfo serviceInfo) {
                 registered = true;
-                Log.i(TAG, "已注册: " + serviceInfo.getServiceName() + " " + SERVICE_TYPE + ":" + port);
+                registeredIp = bindIp;
+                Log.i(TAG, "已注册: " + serviceInfo.getServiceName() + " " + SERVICE_TYPE + ":" + port
+                        + " host=" + (bindIp.isEmpty() ? "(系统选择)" : bindIp));
                 notifyState("registered", serviceInfo.getServiceName() + "." + SERVICE_TYPE);
             }
 
@@ -167,6 +200,15 @@ public final class MdnsAdvertiser {
         }
         if (!registered) {
             Log.i(TAG, "自检发现未注册，重新宣告");
+            register();
+            return;
+        }
+        // 注册状态还在，但实际绑定的 IP 已经变了（换 WiFi / DHCP 续约）：
+        // NsdManager 不会自动迁移，必须重新注册，否则对端一直拿着旧地址。
+        if (!localIp.isEmpty() && !localIp.equals(registeredIp)) {
+            Log.i(TAG, "自检发现 IP 变化 " + registeredIp + " -> " + localIp + "，重新宣告");
+            notifyState("ip-changed", "局域网 IP 变为 " + localIp + "，重新宣告");
+            unregister();
             register();
         }
     }

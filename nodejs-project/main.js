@@ -725,6 +725,35 @@ function createControlApp(opts, state) {
     });
   });
 
+  /**
+   * 已配对对端的实时地址：发现结果（安卓上报 + Node 自身发现）优先，
+   * 找不到才回落到 peers.json。对端换 IP 后靠这个跟上。
+   * 有 deviceId 时只按 deviceId 认人（避免新设备占用旧 IP 被误认为同一台）；
+   * 没有 deviceId 才退化为 host:port 匹配。
+   */
+  function freshAddressFor(peer) {
+    if (!peer) return null;
+    const candidates = (state.androidPeers || [])
+      .concat(state.discovery ? state.discovery.list() : []);
+    const hit = candidates.find((d) => {
+      if (!d || !d.host || !d.port) return false;
+      if (peer.deviceId) return d.deviceId === peer.deviceId;
+      return d.host === peer.host && Number(d.port) === Number(peer.port);
+    });
+    if (!hit) return null;
+    return {
+      host: hit.host,
+      port: Number(hit.port),
+      scheme: hit.scheme || peer.scheme || 'http',
+    };
+  }
+
+  function withFreshAddress(peer) {
+    if (!peer) return null;
+    const fresh = freshAddressFor(peer);
+    return fresh ? Object.assign({}, peer, fresh) : Object.assign({}, peer);
+  }
+
   // 安卓上报 Java mDNS 发现的对端列表（发现靠安卓，Node 只缓存展示）。
   app.post('/peers/report', jsonBody, (req, res) => {
     const list = (req.body && Array.isArray(req.body.devices)) ? req.body.devices : [];
@@ -739,7 +768,31 @@ function createControlApp(opts, state) {
         source: 'android',
       }));
     state.androidPeersAt = Date.now();
-    res.json({ ok: true, count: state.androidPeers.length });
+    // 已配对对端换了 IP：按 deviceId 回写持久化地址（凭据不动），
+    // 并把已经写死旧地址的 replication 重建到新地址。
+    const moved = [];
+    state.androidPeers.forEach((d) => {
+      if (!d.deviceId) return;
+      const key = Object.keys(state.peerStore.peers)
+        .find((k) => state.peerStore.peers[k].deviceId === d.deviceId);
+      if (!key) return;
+      const p = state.peerStore.peers[key];
+      if (p.host === d.host && Number(p.port) === Number(d.port)) return;
+      moved.push({ from: p.host + ':' + p.port, key });
+      p.host = d.host;
+      p.port = Number(d.port);
+      p.scheme = d.scheme || p.scheme || 'http';
+      p.updatedAt = Date.now();
+    });
+    if (moved.length) {
+      savePeers(state.peerStore);
+      moved.forEach((m) => {
+        const p = state.peerStore.peers[m.key];
+        console.log('[peers] 对端地址变化 ' + m.from + ' -> ' + p.host + ':' + p.port);
+        restartReplicationsFor(m.from, p);
+      });
+    }
+    res.json({ ok: true, count: state.androidPeers.length, moved: moved.length });
   });
 
   // 安卓上报已配对结果（doPair 成功后调用），写入 peers.json，供按 peer 同步与 /sync/status。
@@ -831,7 +884,7 @@ function createControlApp(opts, state) {
   // 用已保存凭据拉取对端数据库列表（服务端代发，规避跨域）
   app.get('/peer/dbs', async (req, res) => {
     const key = req.query.key || '';
-    const peer = state.peerStore.peers[key];
+    const peer = withFreshAddress(state.peerStore.peers[key]);
     if (!peer) {
       res.status(404).json({ error: 'not_found', reason: 'unknown peer key' });
       return;
@@ -858,36 +911,33 @@ function createControlApp(opts, state) {
   });
 
   // ---------------- 同步 ----------------
-  app.post('/replicate', jsonBody, (req, res) => {
-    const b = req.body || {};
-    const db = b.db;
-    // 传 peer（已配对的 key）时可省略 host/port/凭据，直接用保存的配对信息
-    const saved = b.peer ? state.peerStore.peers[b.peer] : null;
-    const remoteHost = b.remoteHost || (saved && saved.host) || '';
-    const remotePort = b.remotePort || (saved && saved.port) || '';
-    if (!db || !remoteHost || !remotePort) {
-      res.status(400).json({ error: 'bad_request', reason: 'db, remoteHost, remotePort required' });
-      return;
-    }
-    const scheme = b.remoteScheme || (saved && saved.scheme) || 'http';
-    const remoteUser = b.remoteUser || (saved && saved.user) || '';
-    const remotePass = b.remotePass || (saved && saved.pass) || '';
+  /**
+   * 建立 replication。/replicate 与「对端换 IP 后自动重建」共用。
+   * 返回 { ok, key, note? }。
+   */
+  function startReplication(opts) {
+    const db = opts.db;
+    const remoteHost = opts.remoteHost;
+    const remotePort = opts.remotePort;
+    const scheme = opts.scheme || 'http';
+    const remoteUser = opts.remoteUser || '';
+    const remotePass = opts.remotePass || '';
+    const live = !!opts.live;
+    const peerKey = opts.peerKey || (remoteHost + ':' + remotePort);
     const auth = (remoteUser && remotePass)
       ? encodeURIComponent(remoteUser) + ':' + encodeURIComponent(remotePass) + '@'
       : '';
     const remote = scheme + '://' + auth + remoteHost + ':' + remotePort + '/' + encodeURIComponent(db);
     const key = db + '@' + remoteHost + ':' + remotePort;
-    const peerKey = b.peer || (remoteHost + ':' + remotePort);
     if (state.replications[key]) {
-      res.json({ ok: true, key, note: 'already running' });
-      return;
+      return { ok: true, key, note: 'already running' };
     }
     const local = new PouchDB(db);
     // create_target: 远端（对端）还没有这个库时自动创建——手机上勾选同步时，
     // 对端通常并不存在同名库，默认 false 会直接让同步失败。
-    const rep = local.sync(remote, { live: !!b.live, retry: !!b.live, create_target: true });
+    const rep = local.sync(remote, { live, retry: live, create_target: true });
     const entry = {
-      rep, db, remote, live: !!b.live,
+      rep, db, remote, live,
       status: 'starting', lastSeq: null, error: null,
     };
     rep.on('change', (info) => {
@@ -911,8 +961,55 @@ function createControlApp(opts, state) {
       recordSync(state, mkSyncEv(peerKey, db, 'error', 'error', entry.lastSeq));
     });
     state.replications[key] = entry;
-    console.log('[replicate] 启动 ' + key + ' live=' + !!b.live);
-    res.json({ ok: true, key });
+    console.log('[replicate] 启动 ' + key + ' live=' + live);
+    return { ok: true, key };
+  }
+
+  /**
+   * 对端地址变化后重建同步：旧 remote URL 已写死旧 IP，live+retry 只会无限重试旧地址。
+   * 这里取消旧的并按新地址重开（凭据、库名、live 保持不变）。
+   */
+  function restartReplicationsFor(oldAddr, peer) {
+    Object.keys(state.replications).forEach((key) => {
+      const e = state.replications[key];
+      if (!e || !e.remote || e.remote.indexOf(oldAddr) < 0) return;
+      try { e.rep.cancel(); } catch (err) { /* ignore */ }
+      delete state.replications[key];
+      console.log('[replicate] 对端地址变化，重建 ' + key + ' -> ' + peer.host + ':' + peer.port);
+      startReplication({
+        db: e.db,
+        live: e.live,
+        remoteHost: peer.host,
+        remotePort: peer.port,
+        scheme: peer.scheme,
+        remoteUser: peer.user,
+        remotePass: peer.pass,
+        peerKey: key,
+      });
+    });
+  }
+
+  app.post('/replicate', jsonBody, (req, res) => {
+    const b = req.body || {};
+    const db = b.db;
+    // 传 peer（已配对的 key）时可省略 host/port/凭据，直接用保存的配对信息
+    const saved = b.peer ? withFreshAddress(state.peerStore.peers[b.peer]) : null;
+    const remoteHost = b.remoteHost || (saved && saved.host) || '';
+    const remotePort = b.remotePort || (saved && saved.port) || '';
+    if (!db || !remoteHost || !remotePort) {
+      res.status(400).json({ error: 'bad_request', reason: 'db, remoteHost, remotePort required' });
+      return;
+    }
+    res.json(startReplication({
+      db,
+      remoteHost,
+      remotePort,
+      scheme: b.remoteScheme || (saved && saved.scheme) || 'http',
+      remoteUser: b.remoteUser || (saved && saved.user) || '',
+      remotePass: b.remotePass || (saved && saved.pass) || '',
+      live: b.live,
+      peerKey: b.peer,
+    }));
   });
 
   app.get('/replications', (req, res) => {
@@ -948,8 +1045,9 @@ function createControlApp(opts, state) {
     if (state.syncStatusCache && Date.now() - state.syncStatusCache.at < 5000) {
       return res.json(state.syncStatusCache.data);
     }
+    // 地址优先取发现结果：对端换 IP 后 peers.json 里的是旧地址，直接用会一直探测失败。
     const peers = Object.keys(state.peerStore.peers || {}).map((k) =>
-      Object.assign({ key: k }, state.peerStore.peers[k]));
+      Object.assign({ key: k }, withFreshAddress(state.peerStore.peers[k])));
     const discovered = state.discovery ? state.discovery.list() : [];
     const out = [];
     for (const peer of peers) {

@@ -155,6 +155,18 @@ public final class MdnsDiscovery {
         this.localDataPort = localDataPort;
     }
 
+    /**
+     * 网络变化（换 WiFi / 换 IP）后调用：更新本机 IP 并重启一轮发现。
+     * 旧会话可能已僵死（系统在断网时未必通知 onServiceLost），重启最稳。
+     */
+    public synchronized void refreshLocal(String ip, int port) {
+        setLocal(ip, port);
+        if (started) {
+            log("本机 IP 变化为 " + (localIp.isEmpty() ? "未知" : localIp) + "，重启发现");
+            restart();
+        }
+    }
+
     private void restart() {
         stopDiscovery();
         beginDiscovery();

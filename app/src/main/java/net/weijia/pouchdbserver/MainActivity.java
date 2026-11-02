@@ -9,6 +9,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -98,6 +100,7 @@ public class MainActivity extends Activity {
 
     // ===== 局域网发现 / 配对 / 同步 =====
     private MdnsDiscovery mdns;
+    private ConnectivityManager.NetworkCallback networkCallback;
     private final Map<String, MdnsDiscovery.Peer> peerMap = new HashMap<>();
     private EditText etAdminUser;
     private EditText etAdminPass;
@@ -150,6 +153,7 @@ public class MainActivity extends Activity {
         btnClearLog = findViewById(R.id.btnClearLog);
 
         setupWebView();
+        registerNetworkCallback();
 
         tabBrowser.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -450,6 +454,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         alive.set(false);
+        mainHandler.removeCallbacks(networkRefresh);
+        unregisterNetworkCallback();
         scheduler.shutdownNow();
         reportExecutor.shutdownNow();
         if (webView != null) {
@@ -563,6 +569,67 @@ public class MainActivity extends Activity {
         } catch (Throwable t) {
             // 忽略：下次仍可同步，仅网页端暂时看不到该对端。
         }
+    }
+
+    // ===== 网络变化：换 WiFi / 换 IP 后刷新发现 =====
+
+    /** 换网后系统会先 onLost 再 onAvailable，去抖 2s 统一处理，避免来回重启。 */
+    private final Runnable networkRefresh = new Runnable() {
+        @Override
+        public void run() {
+            String ip = NetUtils.getLanIp(MainActivity.this);
+            bootLog("网络变化，刷新 mDNS 发现 IP=" + (ip.isEmpty() ? "未知" : ip));
+            if (mdns != null) {
+                mdns.refreshLocal(ip, prefs.getPort());
+            }
+            // 立即上报一次当前列表，避免管理页停留在旧 IP（重启发现后还会再报）。
+            reportDiscoveredPeers(new ArrayList<>(peerMap.values()));
+        }
+    };
+
+    private void registerNetworkCallback() {
+        if (networkCallback != null) {
+            return;
+        }
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) {
+                return;
+            }
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    scheduleNetworkRefresh();
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    scheduleNetworkRefresh();
+                }
+            };
+            cm.registerDefaultNetworkCallback(networkCallback);
+        } catch (Throwable t) {
+            Log.w(TAG, "注册网络回调失败: " + t.getMessage());
+        }
+    }
+
+    private void scheduleNetworkRefresh() {
+        mainHandler.removeCallbacks(networkRefresh);
+        mainHandler.postDelayed(networkRefresh, 2000);
+    }
+
+    private void unregisterNetworkCallback() {
+        if (networkCallback == null) {
+            return;
+        }
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                cm.unregisterNetworkCallback(networkCallback);
+            }
+        } catch (Throwable ignored) {
+        }
+        networkCallback = null;
     }
 
     private void startDiscovery() {
